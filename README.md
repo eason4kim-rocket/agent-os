@@ -45,6 +45,10 @@ export AGENTOS_MODEL=glm-4.6                  # optional
 | `plain` | software-level policy checks (incl. run_command operand validation) | always available (macOS 27 removed Seatbelt) |
 
 > The ledger honestly records the enforcement level actually used for every run.
+> Known boundary: `plain` does not resolve symlinks in command operands (residual
+> escape risk on macOS development setups — use `landlock`/`srt` backends for
+> adversarial workloads). All backends refuse policies with `network: true`
+> until a network-enforcing backend exists (fail-closed).
 
 ## Rust core (`rust/`)
 
