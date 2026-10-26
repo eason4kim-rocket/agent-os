@@ -75,6 +75,23 @@ fn daemon_status_exec_runs_verify() {
     assert_eq!(resp["result"]["denied"], true);
     assert!(resp["result"]["stderr"].as_str().unwrap().contains("outside allowed roots"));
 
+    // exec：异步受理 + watch 轮询到完成
+    let resp = req(&cfg.socket, "exec", json!({"policy": policy, "argv": ["cat", "a.txt"], "wait": false}));
+    assert_eq!(resp["result"]["accepted"], true);
+    let run = resp["result"]["run"].as_str().unwrap().to_string();
+    let mut done = false;
+    for _ in 0..40 {
+        let w = req(&cfg.socket, "watch", json!({"run": run}));
+        if w["result"]["state"] == "done" {
+            assert_eq!(w["result"]["rc"], 0);
+            assert_eq!(w["result"]["stdout"].as_str().unwrap().trim(), "hello");
+            done = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(done, "watch 轮询超时仍未完成");
+
     // runs
     let runs = req(&cfg.socket, "runs", json!({}));
     assert!(runs["result"]["total_runs"].as_u64().unwrap() >= 1);
