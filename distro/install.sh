@@ -20,6 +20,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "$SOURCE" ]] || { echo "需要 --source <仓库根>"; exit 2; }
+id -u "$RUN_USER" 2>/dev/null | grep -qv "^0$" || { echo "服务运行用户不能是 root"; exit 2; }
 [[ $EUID -ne 0 ]] || { echo "请勿以 root 运行本脚本（服务运行用户用 --user 指定）"; exit 2; }
 command -v python3 >/dev/null || { echo "需要 python3"; exit 2; }
 [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
@@ -56,8 +57,8 @@ sudo install -d -m 0750 -o "$RUN_USER" "$STATE"
 sudo install -d -m 0750 -o "$RUN_USER" "$STATE/policies"
 # socket 目录：namespace 挂载前必须已存在；tmpfiles.d 保证重启后自动重建
 RUN_GROUP="$(id -gn "$RUN_USER")"
-sudo install -d -m 0755 -o "$RUN_USER" -g "$RUN_GROUP" /run/agentos
-echo "d /run/agentos 0755 $RUN_USER $RUN_GROUP -" | sudo tee /etc/tmpfiles.d/agentos.conf >/dev/null
+sudo install -d -m 0700 -o "$RUN_USER" -g "$RUN_GROUP" /run/agentos
+echo "d /run/agentos 0700 $RUN_USER $RUN_GROUP -" | sudo tee /etc/tmpfiles.d/agentos.conf >/dev/null
 if [[ -n "$WORKDIR" ]]; then
   sudo install -d -m 0750 -o "$RUN_USER" "$WORKDIR"
 fi
@@ -91,7 +92,7 @@ sudo python3 - "$UNIT" "$RUN_USER" "$BIN" "$STATE" "$WORKDIR" "$SOCKET" <<'PY'
 # H-1 修复：模板渲染用 python 逐键替换（不用 sed，杜绝 workdir 注入 unit）
 import sys
 unit_path, user, bin_dir, state, work, sock = sys.argv[1:7]
-work_rw = ("-" + work) if work else ""
+work_rw = work
 s = open(unit_path, encoding="utf-8").read()
 for k, v in {"@USER@": user, "@BIN@": bin_dir, "@STATE@": state,
              "@WORK@": work_rw, "@SOCKET@": sock}.items():
