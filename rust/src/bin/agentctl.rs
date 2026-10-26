@@ -1,10 +1,8 @@
 //! agentctl — agentd 的最小客户端。
 //! 用法：
-//!   agentctl --socket <SOCK> status
-//!   agentctl --socket <SOCK> runs
-//!   agentctl --socket <SOCK> verify
-//!   agentctl --socket <SOCK> exec --policy <policy.json> -- CMD [ARGS]...
-//!   agentctl --socket <SOCK> exec --workdir <DIR> -- CMD [ARGS]...   （合成默认策略）
+//!   agentctl --socket <SOCK> status|runs|verify
+//!   agentctl --socket <SOCK> exec [--policy <已安装策略名>] [--async] -- CMD [ARGS]...
+//! --policy 是 daemon 侧【已安装策略】的名称（非文件）：权限由操作者安装的策略决定。
 
 use agentos_core::daemon::request;
 use serde_json::{json, Value};
@@ -77,6 +75,10 @@ fn main() {
                     "--policy" if i + 1 < argv.len() => { policy_name = argv[i + 1].clone(); i += 2; }
                     "--async" => { wait = false; i += 1; }
                     "--" => { rest = argv[i + 1..].to_vec(); break; }
+                    t if t.starts_with("--") => {
+                        eprintln!("[agentctl] 未知选项: {t}（命令参数请放在 -- 之后）");
+                        std::process::exit(2);
+                    }
                     t => { rest.push(t.to_string()); i += 1; }
                 }
             }

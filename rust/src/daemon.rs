@@ -42,13 +42,16 @@ pub struct Runtime {
 }
 
 pub fn serve(cfg: DaemonConfig) -> std::io::Result<()> {
-    std::fs::create_dir_all(&cfg.state_dir)?;
+    std::fs::create_dir_all(&cfg.state_dir)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("state: create_dir_all {}: {e}", cfg.state_dir.display())))?;
     let policies = Arc::new(load_policies(&cfg.state_dir)?);
     let _ = std::fs::remove_file(&cfg.socket);
     if let Some(parent) = cfg.socket.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("socket: create_dir_all {}: {e}", parent.display())))?;
     }
-    let listener = UnixListener::bind(&cfg.socket)?;
+    let listener = UnixListener::bind(&cfg.socket)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("socket: bind {}: {e}", cfg.socket.display())))?;
 
     // 身份：H3 修复由 identity.rs 保证 0600 与权限校验
     let identity = identity::ensure(&cfg.state_dir)?;
