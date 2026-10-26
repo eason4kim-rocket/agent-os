@@ -1,20 +1,19 @@
-#!/bin/sh
-# AgentOS 一致性运行器：Python 套件 + Rust 套件（含 conformance 案例）+ 双向互操作。
-# 任何一项失败即整体失败。CI 与本地均以此为准。
-set -eu
+#!/bin/bash
+# AgentOS 一致性运行器：任何一项失败即整体失败（pipefail 防管道吞错）。
+set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "== [1/3] Python 回归 =="
-python3 -m unittest discover tests -v 2>&1 | tail -3
+echo "== [1/4] Python 回归 =="
+python3 -m unittest discover tests -v 2>&1 | tail -5
 
-echo "== [2/3] Rust 套件（含 D 系列 conformance 案例） =="
-(cd rust && cargo test --locked 2>&1 | grep -E "test result" )
+echo "== [2/4] Rust 套件（含 D 系列 conformance 案例） =="
+(cd rust && cargo test --locked)
 
-echo "== [3/3] 双向互操作 =="
-(cd rust && cargo test --locked interop 2>&1 | grep -E "test result")
-L=$(find "${TMPDIR:-/tmp}" /tmp -maxdepth 3 -name "ledger.jsonl" -path "*agentos-rs-ledger*" 2>/dev/null | tail -1)
-if [ -n "$L" ]; then
-  python3 - "$L" <<'PYEOF'
+echo "== [3/4] 双向互操作 =="
+(cd rust && cargo test --locked --test interop)
+L=$(find "${TMPDIR:-/tmp}" -maxdepth 3 -name "ledger.jsonl" -path "*agentos-rs-ledger*" 2>/dev/null | tail -1)
+test -n "$L" || { echo "I2 失败：未找到 Rust 写的账本"; exit 1; }
+python3 - "$L" <<'PYEOF'
 import json, os, sys
 sys.path.insert(0, '.')
 from harness.ledger import Ledger
@@ -27,8 +26,8 @@ ok, n, bad = led.verify()
 assert ok, bad
 print(f'I2: Python 验 Rust 账本 {n} 条 ✅')
 PYEOF
-else
-  echo "I2: 跳过（未找到 Rust 写的账本——先跑 cargo test interop）"
-fi
+
+echo "== [4/4] Rust bin 验签口径 =="
+(cd rust && cargo run --locked --quiet --bin ledger-verify -- "$L")
 
 echo "conformance: 全部通过 ✅"

@@ -34,25 +34,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: cargo test
+      - name: cargo test（失败不吞——无管道截断）
         working-directory: rust
-        run: cargo test --locked 2>&1 | tail -20
-      - name: interop (python verifies rust-written ledger)
-        run: |
-          cd rust && cargo test --locked interop 2>&1 | tail -5 && cd ..
-          L=$(find "$RUNNER_TEMP" /tmp -maxdepth 3 -name "ledger.jsonl" -path "*agentos-rs-ledger*" 2>/dev/null | head -1)
-          test -n "$L" || { echo "no rust ledger found"; exit 1; }
-          export LEDGER_PATH="$L"
-          python3 - <<'PYEOF'
-          import json, os, sys
-          sys.path.insert(0, '.')
-          from harness.ledger import Ledger
-          from harness import ed25519
-          from pathlib import Path
-          led = Ledger(Path(os.environ['LEDGER_PATH']))
-          d = led.entries[-1]['detail']
-          assert ed25519.checkvalid(bytes.fromhex(d['agent_sig']), bytes.fromhex(d['signed']), bytes.fromhex(d['agent_pubkey']))
-          ok, n, bad = led.verify()
-          assert ok, bad
-          print('interop ok: %d entries, signature/chain/anchor all pass' % n)
-          PYEOF
+        run: cargo test --locked
+
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: conformance/run.sh（唯一口径：python + rust + 互操作）
+        run: ./conformance/run.sh

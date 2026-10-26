@@ -44,7 +44,7 @@ fn setup(
         std::fs::write(&ledger_path, lines.join("\n") + "\n").unwrap();
     }
 
-    let sock = PathBuf::from(format!("/tmp/agentos-conf-{tag}.sock"));
+    let sock = PathBuf::from(format!("/tmp/agentos-conf-{}-{tag}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
     let cfg = DaemonConfig {
         state_dir: state.clone(),
@@ -156,4 +156,129 @@ fn d10_signature_binds_output_content() {
     }
     assert_eq!(digests.len(), 2);
     assert_ne!(digests[0], digests[1], "同长度不同输出的 run.end 摘要不应相同");
+}
+
+fn hex_decode_rs(s: &str) -> Result<Vec<u8>, ()> {
+    if s.len() % 2 != 0 { return Err(()); }
+    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2*i..2*i+2], 16).map_err(|_| ())).collect()
+}
+
+// ===== L 系列与 D9/P7（二审补齐） =====
+
+use agentos_core::ledger::{canonical, Ledger, GENESIS};
+
+/// D9/L5：换身份重建账本 → 锚点公钥集检测（无锚点时链+签名自洽可过——诚实边界）。
+#[test]
+fn d9_ledger_verify_rejects_forged_identity() {
+    use agentos_core::ledger::{canonical, Ledger, GENESIS};
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
+
+    let dir = std::env::temp_dir().join(format!("agentos-d9-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ledger.jsonl");
+    let anchor = dir.join("ledger.anchor");
+
+    // 攻击者 B：自己的密钥、自己的 policy、正确计算哈希链（链内自洽）
+    let attacker = SigningKey::from_bytes(&[9u8; 32]);
+    let attacker_pk = hex(&attacker.verifying_key().to_bytes());
+    let policy = json!({"schema": "agentos.policy.v0", "workdir": "/", "extra_read": [],
+                        "allow_commands": ["bash"], "network": true, "backend": "auto", "max_steps": 24});
+    let policy_digest = hex(&Sha256::digest(canonical(&policy).as_bytes()));
+    let sig = attacker.sign(&hex_decode(&policy_digest).unwrap());
+    let entry = json!({
+        "schema": "agentos.ledger.v0", "seq": 1, "ts": "t", "run": "forged",
+        "event": "run.start", "detail": {"policy": policy, "agent_pubkey": attacker_pk,
+            "signed": policy_digest, "agent_sig": hex(&sig.to_bytes())},
+        "prev": GENESIS, "hash": ""
+    });
+    let mut no_hash = entry.clone();
+    if let Some(o) = no_hash.as_object_mut() {
+        o.remove("hash");  // 哈希输入必须排除 hash 字段本身（与 verify 口径一致）
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(GENESIS.as_bytes());  // 首条 prev = GENESIS
+    hasher.update(canonical(&no_hash).as_bytes());
+    let hash = hex(&hasher.finalize());
+    let mut entry = entry;
+    entry["hash"] = json!(hash);
+    std::fs::write(&path, canonical(&entry) + "\n").unwrap();
+
+    // 无锚点：链+签名自洽，verify 通过（诚实边界——本地无外部信任基准时无法识破）
+    assert!(Ledger::load(&path).verify(None).is_ok());
+
+    // 有锚点（操作者记录的原始公钥集合不含攻击者）→ 必须拒绝
+    let original_anchor = json!({
+        "schema": "agentos.ledger.anchor.v0", "count": 1,
+        "head": hash, "agent_pubkeys": ["aa".repeat(32)],
+    });
+    std::fs::write(&anchor, canonical(&original_anchor) + "\n").unwrap();
+    let err = Ledger::load(&path)
+        .verify(Some(&anchor))
+        .expect_err("换身份重建的账本必须被锚点拒绝");
+    assert!(err.reason.contains("签名身份不在锚点记录中"), "实际: {}", err.reason);
+}
+
+/// L1/L3/L4（Rust）：空账本、锚点截断、坏行
+#[test]
+fn l_series_ledger_edges_rust() {
+    let dir = std::env::temp_dir().join(format!("agentos-l-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ledger.jsonl");
+    let anchor = dir.join("ledger.anchor");
+
+    // L1：空账本
+    assert!(Ledger::load(&path).verify(Some(&anchor)).is_err());
+
+    // 写 3 条 + 锚点
+    let mut led = Ledger::load(&path);
+    for i in 0..3 {
+        led.append("tool.result", "r", serde_json::json!({"i": i})).unwrap();
+    }
+    led.anchor(&anchor).unwrap();
+
+    // L3：截断尾部 → 锚点核对失败
+    let content = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    std::fs::write(&path, lines[..1].join("\n") + "\n").unwrap();
+    let err = Ledger::load(&path).verify(Some(&anchor)).expect_err("截断应失败");
+    assert!(err.reason.contains("截断"), "实际: {}", err.reason);
+
+    // L4：坏行（断电半行）→ 失败不崩溃
+    std::fs::write(&path, lines[..1].join("\n") + "\n" + "{\"schema\": \"agentos.led\n").unwrap();
+    let err = Ledger::load(&path).verify(Some(&anchor)).expect_err("坏行应失败");
+    assert!(err.reason.contains("解析失败"), "实际: {}", err.reason);
+}
+
+/// P7（Rust）：词法层不解析符号链接——笼内相对路径放行、笼外绝对路径拒绝；
+/// 符号链接的最终语义由 Landlock 内核层兜底（README 已声明该边界）。
+#[test]
+fn p7_symlink_documented_boundary() {
+    let tmp = temp_dir("p7");
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let p = agentos_core::policy::Policy {
+        schema: agentos_core::policy::SCHEMA.into(),
+        workdir: work.to_string_lossy().into(),
+        extra_read: vec![],
+        allow_commands: vec!["ls".into()],
+        network: false,
+        backend: "auto".into(),
+        max_steps: 24,
+    };
+    assert!(p.path_allowed_read("a.txt").is_ok());
+    assert!(p.path_allowed_read("/etc/passwd").is_err());
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
+    if s.len() % 2 != 0 {
+        return Err(());
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| ()))
+        .collect()
 }

@@ -39,6 +39,7 @@ class EscapeDenialTest(unittest.TestCase):
         (["mkdir", "/tmp/escape"], "mkdir /tmp"),
         (["sh", "-c", "id"], "白名单外命令"),
         (["find", ".", "-delete"], "破坏性选项"),
+        (["find", ".", "-exec", "ls"], "破坏性选项 -exec"),
     ]
 
     def test_all_denied(self):
@@ -97,6 +98,7 @@ class LedgerTest(unittest.TestCase):
         ok, _, why = Ledger(self.path).verify()
         self.assertFalse(ok)
         self.assertIn("篡改", why)
+        self.assertIn("seq", why)  # 必须指明行号
 
     def test_truncation_detected_by_anchor(self):
         self.led.append("a", "r")
@@ -134,6 +136,32 @@ class LedgerTest(unittest.TestCase):
             bytes.fromhex(e["detail"]["agent_sig"]),
             bytes.fromhex(e["detail"]["signed"]),
             bytes.fromhex(e["detail"]["agent_pubkey"])))
+
+
+import threading
+
+
+class LedgerConcurrencyTest(unittest.TestCase):
+    """L6：并发追加不断链（两个实例交错写）。"""
+
+    def test_concurrent_append_chain_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.jsonl"
+            ledgers = [Ledger(path), Ledger(path)]
+
+            def append_many(led, tag):
+                for i in range(10):
+                    led.append("tool.result", f"run-{tag}", i=i)
+
+            threads = [threading.Thread(target=append_many, args=(led, t)) for t, led in enumerate(ledgers)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            ok, n, why = Ledger(path).verify()
+            self.assertTrue(ok, f"并发追加后断链: {why}")
+            self.assertEqual(n, 20)
 
 
 class WriteFileTest(unittest.TestCase):
