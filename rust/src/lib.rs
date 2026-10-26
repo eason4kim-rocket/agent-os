@@ -14,3 +14,7 @@ pub mod policy;
 /// Landlock 强制仅存在于 Linux（macOS 上由容器后端兜底，见 harness/sandbox.py）。
 #[cfg(target_os = "linux")]
 pub mod landlock;
+
+pub mod daemon;
+pub mod exec;
+pub mod identity;
