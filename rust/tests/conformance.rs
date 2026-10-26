@@ -158,10 +158,6 @@ fn d10_signature_binds_output_content() {
     assert_ne!(digests[0], digests[1], "同长度不同输出的 run.end 摘要不应相同");
 }
 
-fn hex_decode_rs(s: &str) -> Result<Vec<u8>, ()> {
-    if s.len() % 2 != 0 { return Err(()); }
-    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2*i..2*i+2], 16).map_err(|_| ())).collect()
-}
 
 // ===== L 系列与 D9/P7（二审补齐） =====
 
@@ -253,7 +249,7 @@ fn l_series_ledger_edges_rust() {
 /// P7（Rust）：词法层不解析符号链接——笼内相对路径放行、笼外绝对路径拒绝；
 /// 符号链接的最终语义由 Landlock 内核层兜底（README 已声明该边界）。
 #[test]
-fn p7_symlink_documented_boundary() {
+fn p7_plain_lexical_boundary() {
     let tmp = temp_dir("p7");
     let work = tmp.join("work");
     std::fs::create_dir_all(&work).unwrap();

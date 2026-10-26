@@ -30,6 +30,7 @@ fn tampered_python_ledger_detected() {
         .verify(None)
         .expect_err("篡改必须被检出");
     assert!(err.reason.contains("篡改"), "实际: {}", err.reason);
+    assert!(err.reason.contains("seq"), "必须指明行号: {}", err.reason);
 }
 
 #[test]

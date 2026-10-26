@@ -11,7 +11,7 @@ echo "== [2/4] Rust 套件（含 D 系列 conformance 案例） =="
 
 echo "== [3/4] 双向互操作 =="
 (cd rust && cargo test --locked --test interop)
-L=$(find "${TMPDIR:-/tmp}" -maxdepth 3 -name "ledger.jsonl" -path "*agentos-rs-ledger*" 2>/dev/null | tail -1)
+L=$( { find "${TMPDIR:-/tmp}" -maxdepth 3 -name "ledger.jsonl" -path "*agentos-rs-ledger*" 2>/dev/null || true; } | tail -1 )
 test -n "$L" || { echo "I2 失败：未找到 Rust 写的账本"; exit 1; }
 python3 - "$L" <<'PYEOF'
 import json, os, sys
