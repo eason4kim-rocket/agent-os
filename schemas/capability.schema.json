@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-os.dev/schemas/agentos.capability.v0.json",
+  "title": "AgentOS Capability v0",
+  "description": "Agent identity and capability model (protocol asset P2). Answers three questions: who is this agent (key identity), what was it granted (capability package), and why is it trustworthy (signature chain). v0 fixes the minimal loop: a capability is a signed policy. v1 extends to tool/driver/verifier packages (a neutral counterpart to Octopus SKILL.md and ANOLISA SkillFS).",
+  "type": "object",
+  "required": ["schema", "capability_id", "version", "subject", "grants"],
+  "properties": {
+    "schema": { "const": "agentos.capability.v0" },
+    "capability_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]{2,63}$",
+      "description": "Globally unique capability id, e.g. 'invoice-organizer' or 'fs-workspace-ro'"
+    },
+    "version": { "type": "string", "description": "Semantic version" },
+    "subject": {
+      "type": "object",
+      "required": ["agent_key"],
+      "properties": {
+        "agent_key": {
+          "type": "string",
+          "description": "ed25519 public key (base64) of the grantee — the agent's identity"
+        },
+        "display_name": { "type": "string" }
+      }
+    },
+    "grants": {
+      "type": "array",
+      "description": "Granted capabilities; in v0 each entry embeds one policy object",
+      "items": {
+        "type": "object",
+        "required": ["policy"],
+        "properties": {
+          "policy": {
+            "type": "object",
+            "description": "Policy object (agentos.policy.v0), reviewed by the issuer"
+          },
+          "expires_at": { "type": "string", "description": "Optional expiry, RFC3339" }
+        }
+      }
+    },
+    "issued_by": {
+      "type": "object",
+      "description": "Issuer (a human or a parent agent) — the previous link in the signature chain",
+      "properties": {
+        "key": { "type": "string", "description": "Issuer public key (base64)" },
+        "signature": { "type": "string", "description": "ed25519 signature over canonical(this object without the signatures field), base64" }
+      }
+    },
+    "signatures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "by": { "type": "string", "description": "Signer public key (base64)" },
+          "signature": { "type": "string" },
+          "kind": {
+            "enum": ["human", "agent"],
+            "description": "kind=human means issued by a human. Verifier-type capability packages require at least one human signature — an institutional guardrail: agents cannot grant acceptance authority to agents"
+          }
+        },
+        "required": ["by", "signature", "kind"]
+      }
+    }
+  }
+}

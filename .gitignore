@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# 运行状态（账本/快照）不入库
+workspace/.demo.agentos/
+workspace/.demo2.agentos/
+# 第三方二进制
+tools/landrun*
+.DS_Store

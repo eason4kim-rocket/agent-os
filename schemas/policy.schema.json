@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-os.dev/schemas/agentos.policy.v0.json",
+  "title": "AgentOS Policy v0",
+  "description": "Declarative description of what a task needs (P1 unified policy format). One policy object compiles to any compatible sandbox backend (srt / codex-sandbox / OpenShell / Landlock / containers). Evolution rule: v0.x may add fields, never break existing ones.",
+  "type": "object",
+  "required": ["schema", "workdir"],
+  "properties": {
+    "schema": { "const": "agentos.policy.v0" },
+    "workdir": {
+      "type": "string",
+      "description": "Read-write root: the only writable directory for this task (absolute path)"
+    },
+    "extra_read": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Read-only roots: additional directories readable but not writable"
+    },
+    "allow_commands": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Command allowlist, matched against the basename of argv[0]"
+    },
+    "network": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether the sandboxed task may make outbound network connections. Default false. Model API calls happen outside the sandbox and are not affected by this flag"
+    },
+    "max_steps": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 24,
+      "description": "Model turn budget, as a run-stop guard"
+    },
+    "backend": {
+      "enum": ["auto", "plain", "docker", "srt"],
+      "default": "auto",
+      "description": "Enforcement backend preference; auto degrades kernel-native > container > software. The actual level used MUST be recorded in the ledger"
+    }
+  }
+}
