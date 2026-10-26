@@ -1,0 +1,24 @@
+# AgentOS 运行时服务（系统级，以指定用户运行）
+# 安装：install.sh 会替换 @USER@/@BIN@/@STATE@/@HOME@ 占位符并 enable --now
+[Unit]
+Description=AgentOS agent runtime (policy-enforced exec + signed ledger)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+ExecStart=@BIN@/agentd --state-dir @STATE@ --socket /run/agentos/agentd.sock
+Restart=on-failure
+RestartSec=3
+# 安全加固：服务只需自身文件与 state 目录
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=@STATE@ @WORK@
+ProtectHome=read-only
+PrivateTmp=yes
+RuntimeDirectory=agentos
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
