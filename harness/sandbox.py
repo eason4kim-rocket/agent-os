@@ -210,31 +210,45 @@ class LandlockSandbox(Sandbox):
 
 
 class SrtSandbox(Sandbox):
-    """内核原生强制：Anthropic sandbox-runtime（Linux=Bubblewrap+Landlock）。
+    """内核原生强制：Anthropic sandbox-runtime（Linux=bwrap+Landlock，macOS=Seatbelt）。
 
-    依赖 `srt` CLI 在 PATH 中。仅在 Linux 上达到 kernel-native；
-    macOS 上 srt 同样走 Seatbelt（本机已验证不可用），故 available() 返回 False。
+    2026-10-26 在 Ubuntu 24.04（colima VM，内核 6.8）实测校准的真实接口：
+      - 入口是 `srt-py`（pip 包 sandbox-runtime 0.2.0），不是 `srt`
+      - 权限走 `-s <settings.json>`，JSON 为 **camelCase**：
+        {"filesystem": {"allowWrite": ["/work"], "denyRead": []}, "network": {"allowedDomains": []}}
+      - 读默认放行（deny_read 例外）、写默认拒绝（allow_write 白名单）
+      - 依赖：ripgrep、bubblewrap、socat；Ubuntu 24.04 需
+        `sysctl kernel.apparmor_restrict_unprivileged_userns=0`
     """
 
     name = "srt"
     enforcement = "kernel-native"
+    SRT = "srt-py"  # venv 中的入口；部署时把 venv/bin 加入 PATH
 
     def available(self) -> bool:
-        if not shutil.which("srt"):
-            return False
         import platform
-        return platform.system() == "Linux"
+        return platform.system() == "Linux" and shutil.which(self.SRT) is not None
 
     def execute(self, argv, policy, stdin=None, internal=False):
         blocked = self._precheck(argv, policy, internal)
         if blocked:
             return blocked
-        srt_argv = ["srt", "run",
-                    "--allow-read", str(policy.resolved_workdir()),
-                    "--allow-write", str(policy.resolved_workdir()),
-                    "--"] + argv
-        rc, out, err = _run_pguarded(srt_argv, cwd=str(policy.resolved_workdir()),
-                                     stdin=stdin, timeout=120)
+        import json
+        import tempfile
+        workdir = policy.resolved_workdir()
+        settings = {
+            "filesystem": {
+                "allowWrite": [str(workdir)],
+                "denyRead": [],
+            },
+            "network": {"allowedDomains": []},
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(settings, f)
+            settings_path = f.name
+        srt_argv = [self.SRT, "-s", settings_path] + argv
+        rc, out, err = _run_pguarded(srt_argv, cwd=str(workdir), stdin=stdin, timeout=120)
+        os.unlink(settings_path)
         return SandboxResult(rc, out, err)
 
 

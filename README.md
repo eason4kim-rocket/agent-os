@@ -38,14 +38,10 @@ export AGENTOS_MODEL=glm-4.6                # 可选
 
 | 后端 | 强制级别 | 现状 |
 |---|---|---|
-| `landlock` | **内核原生**：自研 [llandlock](sandbox/llandlock.c)（~100 行 C）编译策略，Docker Desktop 命名卷（VM 内 ext4）上执行；原生 Linux 上可脱容器直用 | ✅ 已验证（含内核级拒绝演示） |
-| `srt` | Anthropic sandbox-runtime（Linux=Bubblewrap+Landlock） | 接口就绪，需 Linux |
+| `landlock` | **内核原生**：自研 [llandlock](sandbox/llandlock.c)（~100 行 C）编译策略，Docker Desktop 命名卷（VM 内 ext4）上执行；原生 Linux 上可脱容器直用 | ✅ 已验证（macOS 容器内 + colima Ubuntu 6.8 真机，含内核级拒绝） |
+| `srt` | **内核原生**：Anthropic sandbox-runtime（Linux=bwrap+Landlock） | ✅ 已验证（colima Ubuntu 24.04 端到端）。依赖：`pip install sandbox-runtime` + ripgrep/bubblewrap/socat；Ubuntu 24.04 需 `sysctl kernel.apparmor_restrict_unprivileged_userns=0`；settings 为 camelCase JSON |
 | `docker` | namespace/cgroups 容器 | ✅ 已验证 |
-| `plain` | 软件层策略预检 | 永远可用（macOS 27 已禁用 Seatbelt） |
-
-> 2026-10-26 实测注记：Docker Desktop 的 macOS 绑定挂载（VirtioFS）上 Landlock 规则不生效，
-> 故 landlock 后端经由命名卷（VM 内 ext4）+ 运行前后同步；同一 llandlock 在原生 Linux 上
-> 无需此中转。
+| `plain` | 软件层策略预检（含 run_command 操作数检查） | 永远可用（macOS 27 已禁用 Seatbelt） |
 
 > `plain` 的诚实边界：它挡得住"AI 走 harness 调工具"，挡不住"进程自己绕过 harness"。
 > 需要对抗性隔离时请用 docker/srt 后端。
