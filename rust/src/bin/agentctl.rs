@@ -1,10 +1,8 @@
 //! agentctl — agentd 的最小客户端。
 //! 用法：
-//!   agentctl --socket <SOCK> status
-//!   agentctl --socket <SOCK> runs
-//!   agentctl --socket <SOCK> verify
-//!   agentctl --socket <SOCK> exec --policy <policy.json> -- CMD [ARGS]...
-//!   agentctl --socket <SOCK> exec --workdir <DIR> -- CMD [ARGS]...   （合成默认策略）
+//!   agentctl --socket <SOCK> status|runs|verify
+//!   agentctl --socket <SOCK> exec [--policy <已安装策略名>] [--async] -- CMD [ARGS]...
+//! --policy 是 daemon 侧【已安装策略】的名称（非文件）：权限由操作者安装的策略决定。
 
 use agentos_core::daemon::request;
 use serde_json::{json, Value};
@@ -66,42 +64,31 @@ fn main() {
             }
         }
         "exec" => {
-            let mut policy_file: Option<String> = None;
-            let mut workdir: Option<String> = None;
+            // H1 修复后的口径：--policy 是【已安装策略名】（不是文件/不是内容）——
+            // 权限由操作者安装在 daemon state_dir/policies/ 下，客户端无法自拟。
+            let mut policy_name = "default".to_string();
             let mut rest: Vec<String> = Vec::new();
             let mut i = 0;
             let mut wait = true;
             while i < argv.len() {
                 match argv[i].as_str() {
-                    "--policy" if i + 1 < argv.len() => { policy_file = Some(argv[i + 1].clone()); i += 2; }
-                    "--workdir" if i + 1 < argv.len() => { workdir = Some(argv[i + 1].clone()); i += 2; }
+                    "--policy" if i + 1 < argv.len() => { policy_name = argv[i + 1].clone(); i += 2; }
                     "--async" => { wait = false; i += 1; }
                     "--" => { rest = argv[i + 1..].to_vec(); break; }
+                    t if t.starts_with("--") => {
+                        eprintln!("[agentctl] 未知选项: {t}（命令参数请放在 -- 之后）");
+                        std::process::exit(2);
+                    }
                     t => { rest.push(t.to_string()); i += 1; }
                 }
             }
-            let policy = if let Some(f) = &policy_file {
-                std::fs::read_to_string(f).unwrap_or_else(|e| {
-                    eprintln!("[agentctl] 读 policy 失败: {e}");
-                    std::process::exit(2);
-                })
-            } else if let Some(wd) = &workdir {
-                serde_json::json!({
-                    "schema": "agentos.policy.v0", "workdir": wd, "extra_read": [],
-                    "allow_commands": ["ls","cat","head","tail","grep","wc","mkdir","mv","cp","echo"],
-                    "network": false, "backend": "auto", "max_steps": 24
-                }).to_string()
-            } else {
-                eprintln!("[agentctl] exec 需要 --policy <file> 或 --workdir <dir>");
+            if rest.is_empty() {
+                eprintln!("[agentctl] exec 需要 -- <命令...>");
                 std::process::exit(2);
-            };
-            let policy: Value = serde_json::from_str(&policy).unwrap_or_else(|e| {
-                eprintln!("[agentctl] policy 不是合法 JSON: {e}");
-                std::process::exit(2);
-            });
+            }
             (
                 json!({"id": "ctl", "cmd": "exec",
-                       "params": {"policy": policy, "argv": rest, "wait": wait}}),
+                       "params": {"policy": policy_name, "argv": rest, "wait": wait}}),
                 true,
             )
         }

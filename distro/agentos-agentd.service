@@ -1,0 +1,47 @@
+# AgentOS 运行时服务（系统级，以指定用户运行）
+# 由 distro/install.sh 渲染占位符：@USER@ @BIN@ @STATE@ @WORK@ @SOCKET@
+# 契约：修改策略文件的 workdir 后，必须同步更新本单元的 ReadWritePaths 并
+#       systemctl daemon-reload && restart（workdir 与 ReadWritePaths 双点维护）。
+[Unit]
+Description=AgentOS agent runtime (policy-enforced exec + signed ledger)
+# 依赖的是本地文件系统（state/policies），不需要网络
+After=local-fs.target
+
+[Service]
+Type=simple
+User=@USER@
+ExecStart=@BIN@/agentd --state-dir @STATE@ --socket @SOCKET@
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+# ---- 加固（纵深防御；笼内子进程同属本 cgroup，一并受限） ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+# Landlock 三 syscall 显式放行（@system-service 集合是否已含依 systemd 版本而异）
+SystemCallFilter=@system-service
+SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self
+SystemCallArchitectures=native
+# 写白名单：state（账本/锚点/策略）、socket 目录（RuntimeDirectory 在
+# ProtectSystem=strict 下必须显式加白）、任务工作区（install.sh 保证已存在）
+ReadWritePaths=@STATE@
+ReadWritePaths=/run/agentos
+ReadWritePaths=@WORK@
+
+[Install]
+WantedBy=multi-user.target

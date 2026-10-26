@@ -20,7 +20,8 @@ pub fn hex(bytes: &[u8]) -> String {
 /// 加载或生成身份。已存在的 seed 权限过宽（组/其他人可读）时拒绝加载。
 pub fn ensure(state_dir: &Path) -> std::io::Result<Identity> {
     let d = state_dir.join("identity");
-    std::fs::create_dir_all(&d)?;
+    std::fs::create_dir_all(&d)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("identity: create_dir_all {}: {e}", d.display())))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -32,7 +33,9 @@ pub fn ensure(state_dir: &Path) -> std::io::Result<Identity> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&seed_file)?.permissions().mode() & 0o777;
+            let mode = std::fs::metadata(&seed_file)
+                .map_err(|e| std::io::Error::new(e.kind(), format!("identity: stat {}: {e}", seed_file.display())))?
+                .permissions().mode() & 0o777;
             if mode & 0o077 != 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -52,7 +55,20 @@ pub fn ensure(state_dir: &Path) -> std::io::Result<Identity> {
         })?
     } else {
         let mut seed = [0u8; 32];
-        std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
+        // systemd PrivateDevices=yes 会遮蔽 /dev/urandom 文件——用 getrandom(2) 直取
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let got = libc::syscall(libc::SYS_getrandom, seed.as_mut_ptr() as *mut libc::c_void, 32 as libc::size_t, 0 as libc::c_uint);
+            if got < 32 {
+                let e = std::io::Error::last_os_error();
+                return Err(std::io::Error::new(e.kind(), format!("identity: getrandom: {e}")));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        std::fs::File::open("/dev/urandom")
+            .map_err(|e| std::io::Error::new(e.kind(), format!("identity: open /dev/urandom: {e}")))?
+            .read_exact(&mut seed)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("identity: read urandom: {e}")))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -60,9 +76,10 @@ pub fn ensure(state_dir: &Path) -> std::io::Result<Identity> {
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .write(true)
-                .open(&seed_file)?
-                .write_all(&seed)?;
+                .open(&seed_file)
+                .map_err(|e| std::io::Error::new(e.kind(), format!("identity: create seed: {e}")))?
+                .write_all(&seed)
+                .map_err(|e| std::io::Error::new(e.kind(), format!("identity: write seed: {e}")))?;
         }
         #[cfg(not(unix))]
         std::fs::write(&seed_file, seed)?;
@@ -70,7 +87,8 @@ pub fn ensure(state_dir: &Path) -> std::io::Result<Identity> {
     };
     let signing = SigningKey::from_bytes(&seed);
     let pubkey_hex = hex(&VerifyingKey::from(&signing).to_bytes());
-    std::fs::write(&pub_file, &pubkey_hex)?;
+    std::fs::write(&pub_file, &pubkey_hex)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("identity: write pub: {e}")))?;
     Ok(Identity { signing, pubkey_hex })
 }
 
