@@ -53,6 +53,11 @@ struct PathBeneathAttr {
     parent_fd: i32,
 }
 
+/// 内核是否支持 Landlock ABI v4+（网络强制前提）。供 executor 如实判定。
+pub fn network_supported() -> bool {
+    probe_abi() >= 4
+}
+
 fn probe_abi() -> i64 {
     unsafe { libc::syscall(SYS_LLANDLOCK_CREATE_RULESET, std::ptr::null::<libc::c_void>(), 0 as libc::size_t, LL_CREATE_RULESET_VERSION as libc::c_uint) as i64 }
 }

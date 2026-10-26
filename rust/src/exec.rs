@@ -143,6 +143,16 @@ impl Executor for LandlockExecutor {
         "kernel-native"
     }
     fn execute(&self, policy: &Policy, argv: &[String], stdin: Option<&str>) -> ExecResult {
+        // H-2 修复：不虚报——与 llrun 同口径探测内核 ABI；不支持时如实 false
+        let network_enforced = if policy.network {
+            true // 允许联网的策略无"强制禁网"可言
+        } else {
+            #[cfg(target_os = "linux")]
+            let supported = crate::landlock::network_supported();
+            #[cfg(not(target_os = "linux"))]
+            let supported = false;
+            supported
+        };
         let mut cmd = Command::new(&self.llrun_path);
         cmd.arg("--rw").arg(policy.workdir());
         for d in &self.rox_dirs {
@@ -151,7 +161,7 @@ impl Executor for LandlockExecutor {
         cmd.arg("--").args(argv).current_dir(policy.workdir());
         let (rc, out, err) = run_with_timeout(&mut cmd, stdin, Duration::from_secs(120));
         ExecResult { rc, stdout: out, stderr: err, enforcement: self.enforcement().into(),
-                     network_enforced: true } // --network none：容器层强制
+                     network_enforced }
     }
 }
 

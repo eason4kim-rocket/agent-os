@@ -88,7 +88,7 @@ class PlainSandbox(Sandbox):
             return blocked
         rc, out, err = _run_pguarded(argv, cwd=str(policy.resolved_workdir()),
                                      stdin=stdin, timeout=60)
-        return SandboxResult(rc, out, err, enforcement=self.enforcement)
+        return SandboxResult(rc, out, err, enforcement=self.enforcement, network_enforced=False)
 
 
 class DockerSandbox(Sandbox):
@@ -122,7 +122,7 @@ class DockerSandbox(Sandbox):
             "-w", "/work", self.IMAGE,
         ] + argv
         rc, out, err = _run_pguarded(docker_argv, cwd=None, stdin=stdin, timeout=120)
-        return SandboxResult(rc, out, err, enforcement=self.enforcement)
+        return SandboxResult(rc, out, err, enforcement=self.enforcement, network_enforced=True)
 
 
 class LandlockSandbox(Sandbox):
@@ -209,7 +209,7 @@ class LandlockSandbox(Sandbox):
             docker_argv += ["-v", f"{Path(str(r)).resolve()}:{name}:ro", "--ro", name]
         docker_argv += ["--"] + argv
         rc, out, err = _run_pguarded(docker_argv, cwd=None, stdin=stdin, timeout=120)
-        return SandboxResult(rc, out, err, enforcement=self.enforcement)
+        return SandboxResult(rc, out, err, enforcement=self.enforcement, network_enforced=True)
 
 
 class SrtSandbox(Sandbox):

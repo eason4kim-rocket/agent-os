@@ -339,11 +339,12 @@ fn run_task(rt: &Runtime, run: &str, policy: Policy, argv: Vec<String>, stdin: O
         "exec.result",
         run,
         json!({"argv": argv, "rc": res.rc, "enforcement": res.enforcement,
-               "network_enforced": policy.network}),
+               "network_enforced": res.network_enforced}),
     );
     let outcome = json!({
         "run": run, "argv": argv, "rc": res.rc,
         "stdout": res.stdout, "stderr": res.stderr, "enforcement": res.enforcement,
+        "network_enforced": res.network_enforced,
     });
     let outcome_digest = sha256_hex(&crate::ledger::canonical(&outcome));
     let sig = rt.identity.sign_digest(&hex_decode32(&outcome_digest).unwrap_or([0u8; 32]));
@@ -358,7 +359,7 @@ fn run_task(rt: &Runtime, run: &str, policy: Policy, argv: Vec<String>, stdin: O
 
     json!({"state": "done", "run": run, "denied": false, "rc": res.rc,
            "stdout": res.stdout, "stderr": res.stderr,
-           "enforcement": res.enforcement})
+           "enforcement": res.enforcement, "network_enforced": res.network_enforced})
 }
 
 /// FIFO 淘汰：状态表超过 256 条时移除最旧（M3 内存泄漏修复）。
@@ -467,14 +468,14 @@ fn peer_uid_is_self(stream: &UnixStream) -> bool {
             if libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED,
                                 &mut cred as *mut libc::ucred as *mut libc::c_void,
                                 &mut len) != 0 {
-                return true; // 无法取凭据的平台：放行（socket 0600 已挡跨用户）
+                eprintln!("[agentd] peer 凭据获取失败，拒绝连接（fail-closed）");
+                return false;
             }
         }
         cred.uid == euid
     }
     #[cfg(target_os = "macos")]
     {
-        // struct xucred { cr_version: u32, cr_uid: u32, cr_ngroups: i16, cr_groups[16]: gid_t }
         #[repr(C)]
         struct Xucred { cr_version: u32, cr_uid: u32, cr_ngroups: i16, cr_groups: [u32; 16] }
         const LOCAL_PEERCRED: libc::c_int = 0x001;
@@ -486,11 +487,14 @@ fn peer_uid_is_self(stream: &UnixStream) -> bool {
             if libc::getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED,
                                 &mut cred as *mut Xucred as *mut libc::c_void,
                                 &mut len) != 0 {
-                return true;
+                eprintln!("[agentd] peer 凭据获取失败，拒绝连接（fail-closed）");
+                return false;
             }
         }
         if cred.cr_version != XUCRED_VERSION {
-            return true; // 版本不符：放行并记录（与上同口径）
+            // 版本不符 = 结构布局不可信 → fail-closed（审计 M-3）
+            eprintln!("[agentd] peer 凭据版本不符，拒绝连接（fail-closed）");
+            return false;
         }
         cred.cr_uid == euid
     }

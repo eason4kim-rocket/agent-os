@@ -94,7 +94,7 @@ fn d3_network_policy_rejected_at_load() {
     assert!(!installed.iter().any(|p| p == "net"));
 }
 
-/// D7：大输出（>64KiB 管道容量）正常返回，不得假超时（M2 回归）
+/// D7：大输出（2MiB > 64KiB 管道容量）正常返回，不得假超时（M2 回归）
 #[test]
 fn d7_large_output_no_fake_timeout() {
     let (sock, state, work) = setup("d7", |w| vec![("default".into(), default_policy(w))], None);
@@ -284,6 +284,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
 #[test]
 fn n1_network_denied_by_kernel() {
     use agentos_core::exec::{LandlockExecutor, Executor};
+    use std::process::{Command, Stdio};
     let llrun = PathBuf::from(env!("CARGO_BIN_EXE_llrun"));
     let work = temp_dir("n1-work");
     std::fs::write(work.join("a.txt"), "hello").unwrap();
@@ -306,12 +307,24 @@ fn n1_network_denied_by_kernel() {
     let ok = ex.execute(&policy, &["cat".into(), "a.txt".into()], None);
     assert_eq!(ok.rc, 0, "正向对照失败: {}", ok.stderr);
 
-    // 内核拒网：TCP connect 被拒（若未强制，GH runner 有外网 → 会连上 → 测试失败）
+    // 正向对照：沙箱外直连必须成功——runner 无出网则诚实跳过（优于假绿）
+    let control = Command::new("bash")
+        .args(["-c", "exec 3<>/dev/tcp/1.1.1.1/80"])
+        .stdout(Stdio::null()).stderr(Stdio::null())
+        .status().expect("bash 不可用");
+    if !control.success() {
+        eprintln!("[n1] 跳过：runner 无出网，正向对照失败");
+        return;
+    }
+
+    // 内核拒网：同一 connect 在笼内必须被拒（EACCES → bash 报 Permission denied）
     let net = ex.execute(
         &policy,
         &["bash".into(), "-c".into(), "exec 3<>/dev/tcp/1.1.1.1/80".into()],
         None,
     );
     assert_ne!(net.rc, 0, "网络未被强制（出网成功）: {}", net.stderr);
+    assert!(net.stderr.contains("Permission denied"),
+            "预期内核 EACCES 拒绝，实际: {}", net.stderr);
     assert!(net.network_enforced);
 }
