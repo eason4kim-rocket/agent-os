@@ -25,15 +25,57 @@ fn main() {
 
     let (req, result_only): (Value, bool) = match cmd.as_str() {
         "status" | "runs" | "verify" => (json!({"id": "ctl", "cmd": cmd, "params": {}}), false),
+        "watch" => {
+            let Some(run) = argv.first() else {
+                eprintln!("用法: agentctl watch <run> [--timeout S]");
+                std::process::exit(2);
+            };
+            let timeout = argv
+                .iter()
+                .position(|a| a == "--timeout")
+                .and_then(|i| argv.get(i + 1))
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(120);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+            loop {
+                let resp = request(&socket, &json!({"id": "ctl", "cmd": "watch",
+                                                    "params": {"run": run}}))
+                    .unwrap_or_else(|e| {
+                        eprintln!("[agentctl] 连接失败: {e}");
+                        std::process::exit(1);
+                    });
+                let state = resp["result"]["state"].as_str().unwrap_or("");
+                if state == "done" {
+                    let r = &resp["result"];
+                    if let Some(out) = r.get("stdout").and_then(|v| v.as_str()) {
+                        print!("{out}");
+                    }
+                    if let Some(err) = r.get("stderr").and_then(|v| v.as_str()) {
+                        if !err.is_empty() {
+                            eprintln!("{err}");
+                        }
+                    }
+                    let rc = r.get("rc").and_then(|v| v.as_i64()).unwrap_or(-1);
+                    std::process::exit(rc.clamp(0, 125) as i32);
+                }
+                if std::time::Instant::now() >= deadline {
+                    eprintln!("[agentctl] watch 超时（{timeout}s），任务仍在后台运行");
+                    std::process::exit(124);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
         "exec" => {
             let mut policy_file: Option<String> = None;
             let mut workdir: Option<String> = None;
             let mut rest: Vec<String> = Vec::new();
             let mut i = 0;
+            let mut wait = true;
             while i < argv.len() {
                 match argv[i].as_str() {
                     "--policy" if i + 1 < argv.len() => { policy_file = Some(argv[i + 1].clone()); i += 2; }
                     "--workdir" if i + 1 < argv.len() => { workdir = Some(argv[i + 1].clone()); i += 2; }
+                    "--async" => { wait = false; i += 1; }
                     "--" => { rest = argv[i + 1..].to_vec(); break; }
                     t => { rest.push(t.to_string()); i += 1; }
                 }
@@ -58,7 +100,8 @@ fn main() {
                 std::process::exit(2);
             });
             (
-                json!({"id": "ctl", "cmd": "exec", "params": {"policy": policy, "argv": rest}}),
+                json!({"id": "ctl", "cmd": "exec",
+                       "params": {"policy": policy, "argv": rest, "wait": wait}}),
                 true,
             )
         }
@@ -73,6 +116,13 @@ fn main() {
             let ok = resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
             if result_only {
                 if let Some(r) = resp.get("result") {
+                    if r.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        if let Some(run) = r.get("run").and_then(|v| v.as_str()) {
+                            println!("{run}");
+                            println!("[agentctl] 已受理（异步），查看进度: agentctl watch {run}");
+                        }
+                        std::process::exit(0);
+                    }
                     if let Some(out) = r.get("stdout").and_then(|v| v.as_str()) {
                         print!("{out}");
                     }
