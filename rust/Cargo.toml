@@ -1,0 +1,21 @@
+[package]
+name = "agentos-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "AgentOS core: policy compiler, hash-chain ledger (agentos.ledger.v0), Landlock enforcement"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ed25519-dalek = "2"
+
+[[bin]]
+name = "llrun"
+path = "src/bin/llrun.rs"
+
+[[bin]]
+name = "ledger-verify"
+path = "src/bin/ledger_verify.rs"

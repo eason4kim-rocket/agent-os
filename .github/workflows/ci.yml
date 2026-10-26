@@ -1,7 +1,7 @@
 name: ci
 on: [push, pull_request]
 jobs:
-  test:
+  python:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,3 +24,29 @@ assert p['schema'] == schema['properties']['schema']['const']
 assert all(k in p for k in schema['required'])
 assert p['backend'] in schema['properties']['backend']['enum']
 print('conformance ok')"
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test
+        working-directory: rust
+        run: cargo test --locked 2>&1 | tail -20
+      - name: interop (python verifies rust-written ledger)
+        run: |
+          cd rust && cargo test --locked interop 2>&1 | tail -5 && cd ..
+          L=$(find "$RUNNER_TEMP" /tmp -maxdepth 3 -name "ledger.jsonl" -path "*agentos-rs-ledger*" 2>/dev/null | head -1)
+          test -n "$L" || { echo "no rust ledger found"; exit 1; }
+          python3 -c "
+import json, sys
+sys.path.insert(0, '.')
+from harness.ledger import Ledger
+from harness import ed25519
+from pathlib import Path
+led = Ledger(Path('$L'))
+d = led.entries[-1]['detail']
+assert ed25519.checkvalid(bytes.fromhex(d['agent_sig']), bytes.fromhex(d['signed']), bytes.fromhex(d['agent_pubkey']))
+ok, n, bad = led.verify()
+assert ok, bad
+print(f'interop ok: {n} entries, signature/chain/anchor all pass')"
