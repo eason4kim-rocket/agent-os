@@ -52,7 +52,7 @@ fn create_ruleset() -> Result<i32, String> {
         libc::syscall(
             SYS_LLANDLOCK_CREATE_RULESET,
             &attr as *const RulesetAttr,
-            std::mem::size_of::<RulesetAttr>() as libc::c_size_t,
+            std::mem::size_of::<RulesetAttr>() as libc::size_t,
             0 as libc::c_uint,
         )
     };
