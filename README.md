@@ -1,65 +1,98 @@
-# Agent OS
+# AgentOS
 
-> 开放的 Agent 能力协议，以及它的参考实现：**给 AI Agent 立规矩**——
-> 笼子（可插拔沙箱：Landlock / bwrap / 容器 / 软件层）、存档（快照回滚）、
-> 行车记录仪（签名哈希链账本）、验收单（独立 verifier）。
+> An open agent-capability protocol and its reference implementation:
+> **rules for AI agents** — a pluggable cage (sandbox: Landlock / bwrap / container /
+> software), snapshots (rollback), a tamper-evident ledger (signed hash chain),
+> and independent acceptance (verifiers).
 
-同一份策略声明（`agentos.policy.v0`）编译到四种强制机制；每次运行动作入账、
-身份签名（ed25519）、锚点防重放。定位与路线图见 [PLAN.md](PLAN.md)，行业调研见 [RESEARCH.md](RESEARCH.md)。
+One policy declaration (`agentos.policy.v0`) compiles to four enforcement
+backends. Every run is recorded to the ledger, signed with the agent's
+ed25519 identity, and anchored against replay. See [PLAN.md](PLAN.md) for the
+roadmap and [RESEARCH.md](RESEARCH.md) for the 2026 landscape survey.
 
-**状态**：阶段 1（协议 v0 草案 + 四后端实证，已在 macOS/Ubuntu 真机验证）。研究预览，格式可能演进。
+**Status**: Phase 1 complete (protocol v0 drafts + four backends verified on
+macOS and native Ubuntu), Phase 2 started (`agentd` resident runtime in
+`rust/`). Research preview — formats may evolve.
 
-## 快速开始（免 key）
-
-在仓库根目录执行（`bin/agentos` 也会自动切到根目录）：
+## Quick start (no API key needed)
 
 ```sh
 ./bin/agentos run --task tasks/demo-organize.md --mock
 ./bin/agentos run --task tasks/demo-organize.md --backend landlock --verifier verifiers/demo_organization.py
-                              # ↑ 内核级 Landlock 强制 + 独立验收判定（阶段1 双后端实证）
-./bin/agentos explain         # 把策略翻译成人类的确认卡
-./bin/agentos verify          # 校验账本哈希链
-./bin/agentos snapshots       # 列出存档（标出最新；rollback 默认恢复它）
-./bin/agentos rollback        # 读档：工作目录恢复到开跑前的乱序状态
+                              # kernel-enforced Landlock + independent acceptance
+./bin/agentos explain         # translate the policy into a human confirmation card
+./bin/agentos verify          # verify the ledger hash chain + anchors + signatures
+./bin/agentos snapshots       # list snapshots (latest is the rollback default)
+./bin/agentos rollback        # restore the working directory from the snapshot
 ```
 
-> **出厂状态说明**：`workspace/demo` 初始为 5 张乱放的发票。`run` 会把它们整理进月份子目录，
-> `rollback` 把它们放回乱放状态——来回对比才能看见效果。想从头再来：删掉
-> `workspace/.demo.agentos/`（账本+快照），再把 `workspace/demo` 手动还原即可。
-> Mock 模式是确定性剧本，动作总是"成功"，仅供机制演示；真实效果请用 GLM 模式。
-
-**自定义工作目录**：`--workdir` 放全局或子命令后均可，账本/快照按目录隔离：
-`./bin/agentos run --workdir ./my-dir --task tasks/demo-organize.md`
-
-## 真实模型模式
+## Real-model mode
 
 ```sh
-export AGENTOS_API_KEY=你的_Z.ai_key        # 或 bigmodel 的 key
-export AGENTOS_API_BASE=https://api.z.ai/api/paas/v4   # 可选，默认 Z.ai
-export AGENTOS_MODEL=glm-4.6                # 可选
+export AGENTOS_API_KEY=your_zai_key           # or a bigmodel key
+export AGENTOS_API_BASE=https://api.z.ai/api/paas/v4   # optional, Z.ai default
+export AGENTOS_MODEL=glm-4.6                  # optional
 ./bin/agentos run --task tasks/demo-organize.md
 ```
 
-## 沙箱后端（可插拔，run 时自动选择）
+## Enforcement backends (pluggable, auto-selected per run)
 
-| 后端 | 强制级别 | 现状 |
+| Backend | Enforcement | Status |
 |---|---|---|
-| `landlock` | **内核原生**：自研 [llandlock](sandbox/llandlock.c)（~100 行 C）编译策略，Docker Desktop 命名卷（VM 内 ext4）上执行；原生 Linux 上可脱容器直用 | ✅ 已验证（macOS 容器内 + colima Ubuntu 6.8 真机，含内核级拒绝） |
-| `srt` | **内核原生**：Anthropic sandbox-runtime（Linux=bwrap+Landlock） | ✅ 已验证（colima Ubuntu 24.04 端到端）。依赖：`pip install sandbox-runtime` + ripgrep/bubblewrap/socat；Ubuntu 24.04 需 `sysctl kernel.apparmor_restrict_unprivileged_userns=0`；settings 为 camelCase JSON |
-| `docker` | namespace/cgroups 容器 | ✅ 已验证 |
-| `plain` | 软件层策略预检（含 run_command 操作数检查） | 永远可用（macOS 27 已禁用 Seatbelt） |
+| `landlock` | **kernel-native**: our [llandlock](sandbox/llandlock.c) (~100 lines of C) compiles the policy; runs on a Docker Desktop named volume (VM-native ext4) on macOS, bare on native Linux | ✅ verified (macOS container + colima Ubuntu 6.8, kernel-level denials demoed) |
+| `srt` | **kernel-native**: Anthropic sandbox-runtime (Linux=bwrap+Landlock) | ✅ verified end-to-end on Ubuntu 24.04. Deps: `pip install sandbox-runtime` + ripgrep/bubblewrap/socat; Ubuntu 24.04 needs `sysctl kernel.apparmor_restrict_unprivileged_userns=0`; settings JSON is camelCase |
+| `docker` | namespace/cgroups container | ✅ verified |
+| `plain` | software-level policy checks (incl. run_command operand validation) | always available (macOS 27 removed Seatbelt) |
 
-> `plain` 的诚实边界：它挡得住"AI 走 harness 调工具"，挡不住"进程自己绕过 harness"。
-> 需要对抗性隔离时请用 docker/srt 后端。
+> The ledger honestly records the enforcement level actually used for every run.
 
-账本会如实记录每次运行实际使用的强制级别——**声明是什么样，就记什么样**。
+## Rust core (`rust/`)
 
-## 目录
+`agentos-core` is the Phase-2 foundation: the same protocol, compiled natively.
 
-- `harness/` 核心实现（纯标准库，无第三方依赖）
-- `schemas/` **协议草案**：`policy.schema.json`（P1 统一策略格式）、`capability.schema.json`（P2 身份/能力模型）
-- `docs/ledger.format.md` **协议草案**（P3 哈希链账本格式）
-- `tasks/` 任务书 ｜ `workspace/demo` 演示工作区
-- 运行状态在 `workspace/.demo.agentos/`（账本 + 快照，刻意放在工作目录外——回滚不能烧掉账本）
+- `policy.rs` — parse + software-level validation for `agentos.policy.v0`
+- `ledger.rs` — chain/anchor/signature verification and append for
+  `agentos.ledger.v0`
+- `landlock.rs` + `llrun` — the Rust port of `llandlock.c` (Linux-only)
 
-一致性检验已通过：`harness/policy.py` 的实际输出符合 `policy.schema.json`（这是"协议与实现同步演进"的最低保障，阶段 1 会升级为正式 conformance 测试套件）。
+**Bidirectional interop is tested**: Rust verifies the Python-generated signed
+ledger fixture; Python verifies the Rust-written ledger (dalek signatures,
+canonical JSON, anchors). CI runs both directions.
+
+```sh
+cd rust && cargo test
+cargo run --bin ledger-verify -- <ledger.jsonl> [ledger.anchor]
+```
+
+## agentd (Phase 2, in progress)
+
+A resident runtime speaking newline-delimited JSON over a Unix socket — the
+"kernel" that executes commands under a policy while the ledger records
+everything.
+
+```sh
+cd rust
+cargo run --bin agentd -- --state-dir /tmp/agentos-state --socket /tmp/agentos.sock
+# another terminal
+cargo run --bin agentctl -- --socket /tmp/agentos.sock status
+```
+
+## Protocol artifacts
+
+- [`schemas/policy.schema.json`](schemas/policy.schema.json) — P1 unified policy format
+- [`docs/ledger.format.md`](docs/ledger.format.md) — P3 hash-chain ledger format
+- [`schemas/capability.schema.json`](schemas/capability.schema.json) — P2 identity/capability model
+- [`docs/AUDIT-2026-10-26.md`](docs/AUDIT-2026-10-26.md) — red-team audit and fix log
+
+## Repository layout
+
+- `harness/` Python reference implementation (stdlib only)
+- `rust/` Rust core (`agentos-core` + `agentd`/`agentctl`/`llrun`/`ledger-verify` bins)
+- `sandbox/` llandlock.c + sandbox image
+- `tasks/` task briefs ｜ `workspace/demo` demo working directory
+- Run state lives in `workspace/.demo.agentos/` (ledger + snapshots — outside the
+  working directory on purpose: rollback must never burn the ledger)
+
+## License
+
+MIT. Security issues: see [CONTRIBUTING.md](CONTRIBUTING.md) for private disclosure.
