@@ -1,7 +1,13 @@
-# Agent OS — 阶段 0 harness
+# Agent OS
 
-给 AI Agent 立规矩的最小参考实现：**笼子（沙箱）+ 存档（快照）+ 行车记录仪（哈希链账本）+ 验收单（finish 报告）**。
-定位与路线图见 [PLAN.md](PLAN.md)，行业调研见 [RESEARCH.md](RESEARCH.md)。
+> 开放的 Agent 能力协议，以及它的参考实现：**给 AI Agent 立规矩**——
+> 笼子（可插拔沙箱：Landlock / bwrap / 容器 / 软件层）、存档（快照回滚）、
+> 行车记录仪（签名哈希链账本）、验收单（独立 verifier）。
+
+同一份策略声明（`agentos.policy.v0`）编译到四种强制机制；每次运行动作入账、
+身份签名（ed25519）、锚点防重放。定位与路线图见 [PLAN.md](PLAN.md)，行业调研见 [RESEARCH.md](RESEARCH.md)。
+
+**状态**：阶段 1（协议 v0 草案 + 四后端实证，已在 macOS/Ubuntu 真机验证）。研究预览，格式可能演进。
 
 ## 快速开始（免 key）
 
