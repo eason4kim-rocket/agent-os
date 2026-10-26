@@ -6,7 +6,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with:
+          python-version: "3.12"
       - name: unit tests
         run: python3 -m unittest discover tests -v
       - name: mock demo end-to-end
@@ -40,15 +41,17 @@ jobs:
           cd rust && cargo test --locked interop 2>&1 | tail -5 && cd ..
           L=$(find "$RUNNER_TEMP" /tmp -maxdepth 3 -name "ledger.jsonl" -path "*agentos-rs-ledger*" 2>/dev/null | head -1)
           test -n "$L" || { echo "no rust ledger found"; exit 1; }
-          python3 -c "
-import json, sys
-sys.path.insert(0, '.')
-from harness.ledger import Ledger
-from harness import ed25519
-from pathlib import Path
-led = Ledger(Path('$L'))
-d = led.entries[-1]['detail']
-assert ed25519.checkvalid(bytes.fromhex(d['agent_sig']), bytes.fromhex(d['signed']), bytes.fromhex(d['agent_pubkey']))
-ok, n, bad = led.verify()
-assert ok, bad
-print(f'interop ok: {n} entries, signature/chain/anchor all pass')"
+          export LEDGER_PATH="$L"
+          python3 - <<'PYEOF'
+          import json, os, sys
+          sys.path.insert(0, '.')
+          from harness.ledger import Ledger
+          from harness import ed25519
+          from pathlib import Path
+          led = Ledger(Path(os.environ['LEDGER_PATH']))
+          d = led.entries[-1]['detail']
+          assert ed25519.checkvalid(bytes.fromhex(d['agent_sig']), bytes.fromhex(d['signed']), bytes.fromhex(d['agent_pubkey']))
+          ok, n, bad = led.verify()
+          assert ok, bad
+          print('interop ok: %d entries, signature/chain/anchor all pass' % n)
+          PYEOF
