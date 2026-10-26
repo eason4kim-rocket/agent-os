@@ -123,6 +123,15 @@ fn load_policies(state_dir: &PathBuf) -> Result<HashMap<String, Policy>, std::io
 }
 
 fn handle_conn(stream: UnixStream, rt: &Arc<Runtime>) -> std::io::Result<()> {
+    // H4 残余修复：对端凭据校验（同用户才可对话；跨用户在 socket 0600 已被内核拒绝，
+    // 此处兜底防 uid 借用场景）
+    if !peer_uid_is_self(&stream) {
+        let resp = json!({"id": null, "ok": false,
+                          "error": "对端身份与 daemon 属主不符（peer uid 校验失败）"});
+        let mut writer = std::io::BufWriter::new(stream);
+        let _ = writeln!(writer, "{}", serde_json::to_string(&resp).unwrap_or_default());
+        return Ok(());
+    }
     const MAX_LINE: usize = 1 << 20; // L1：单行上限 1MiB，防内存 DoS
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = std::io::BufWriter::new(stream);
@@ -441,4 +450,54 @@ pub fn request(socket: &PathBuf, req: &Value) -> std::io::Result<Value> {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()));
     }
     Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "连接被关闭且无响应"))
+}
+
+
+/// 对端凭据校验：Linux=SO_PEERCRED，macOS=LOCAL_PEERCRED。
+/// 比较对端 uid 与本进程 euid；平台不支持时放行（容器内恒同 uid，风险可接受并已记录）。
+fn peer_uid_is_self(stream: &UnixStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let euid = unsafe { libc::geteuid() };
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred = libc::ucred { pid: 0, gid: 0, uid: 0 };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        unsafe {
+            if libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED,
+                                &mut cred as *mut libc::ucred as *mut libc::c_void,
+                                &mut len) != 0 {
+                return true; // 无法取凭据的平台：放行（socket 0600 已挡跨用户）
+            }
+        }
+        cred.uid == euid
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // struct xucred { cr_version: u32, cr_uid: u32, cr_ngroups: i16, cr_groups[16]: gid_t }
+        #[repr(C)]
+        struct Xucred { cr_version: u32, cr_uid: u32, cr_ngroups: i16, cr_groups: [u32; 16] }
+        const LOCAL_PEERCRED: libc::c_int = 0x001;
+        const SOL_LOCAL: libc::c_int = 0;
+        const XUCRED_VERSION: u32 = 0;
+        let mut cred = Xucred { cr_version: 0, cr_uid: 0, cr_ngroups: 0, cr_groups: [0; 16] };
+        let mut len = std::mem::size_of::<Xucred>() as libc::socklen_t;
+        unsafe {
+            if libc::getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED,
+                                &mut cred as *mut Xucred as *mut libc::c_void,
+                                &mut len) != 0 {
+                return true;
+            }
+        }
+        if cred.cr_version != XUCRED_VERSION {
+            return true; // 版本不符：放行并记录（与上同口径）
+        }
+        cred.cr_uid == euid
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = fd;
+        let _ = euid;
+        true
+    }
 }

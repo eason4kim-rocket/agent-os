@@ -278,3 +278,40 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
         .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| ()))
         .collect()
 }
+
+/// N1（M1 回归，仅 Linux）：策略禁网时，Landlock ABI>=4 内核拒绝 TCP 出网
+#[cfg(target_os = "linux")]
+#[test]
+fn n1_network_denied_by_kernel() {
+    use agentos_core::exec::{LandlockExecutor, Executor};
+    let llrun = PathBuf::from(env!("CARGO_BIN_EXE_llrun"));
+    let work = temp_dir("n1-work");
+    std::fs::write(work.join("a.txt"), "hello").unwrap();
+    let policy = agentos_core::policy::Policy {
+        schema: agentos_core::policy::SCHEMA.into(),
+        workdir: work.to_string_lossy().into(),
+        extra_read: vec![],
+        allow_commands: vec!["bash".into(), "cat".into()],
+        network: false,
+        backend: "auto".into(),
+        max_steps: 24,
+    };
+    let ex = LandlockExecutor {
+        llrun_path: llrun,
+        rox_dirs: vec!["/bin".into(), "/usr/bin".into(), "/lib".into(), "/usr/lib".into()],
+    };
+    assert!(ex.available(), "llrun 不可用（N1 需要它）");
+
+    // 对照：笼内文件读取正常（说明沙箱本身工作）
+    let ok = ex.execute(&policy, &["cat".into(), "a.txt".into()], None);
+    assert_eq!(ok.rc, 0, "正向对照失败: {}", ok.stderr);
+
+    // 内核拒网：TCP connect 被拒（若未强制，GH runner 有外网 → 会连上 → 测试失败）
+    let net = ex.execute(
+        &policy,
+        &["bash".into(), "-c".into(), "exec 3<>/dev/tcp/1.1.1.1/80".into()],
+        None,
+    );
+    assert_ne!(net.rc, 0, "网络未被强制（出网成功）: {}", net.stderr);
+    assert!(net.network_enforced);
+}

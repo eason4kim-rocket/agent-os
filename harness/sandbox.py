@@ -29,6 +29,7 @@ class SandboxResult:
     denied: bool = False
     reason: str = ""
     enforcement: str = ""  # M5：实际强制级别，由后端如实填写并记入账本
+    network_enforced: bool | None = None  # M1：网络是否真的被强制；None=未知/不适用
 
 
 def _run_pguarded(argv: list[str], cwd: str | None, stdin: str | None,
@@ -320,6 +321,7 @@ class AgentdSandbox(Sandbox):
             denied=denied,
             reason=str(r.get("stderr", "")) if denied else "",
             enforcement=str(r.get("enforcement", "unknown")),
+            network_enforced=r.get("network_enforced"),
         )
 
 
