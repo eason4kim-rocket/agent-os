@@ -6,9 +6,11 @@
  *   --rox PATH  allow read + execute beneath PATH
  *
  * Uses the official UAPI header (linux-libc-dev). Handled access rights cover
- * ABI v3 (filesystem incl. REFER/TRUNCATE/MAKE_SYM). Network restriction and
- * IOCTL_DEV (ABI v4/v5) are out of scope here: the caller runs the process in a
- * network-less container (defense in depth); IOCTL_DEV gap is documented.
+ * ABI v3 (filesystem incl. REFER/TRUNCATE/MAKE_SYM). On ABI >= 4 (kernel 6.7+)
+ * TCP bind/connect are ALSO denied (deny-all: handled bits set, no net rules);
+ * UDP/ICMP/unix-socket restrictions remain outside Landlock's scope (documented).
+ * IOCTL_DEV (ABI v5) gap is documented. Below v4, callers MUST provide network
+ * isolation at the container/VM layer (a warning is printed).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -35,6 +37,12 @@
     LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK | \
     LANDLOCK_ACCESS_FS_MAKE_SYM | LANDLOCK_ACCESS_FS_REFER | \
     LANDLOCK_ACCESS_FS_TRUNCATE)
+
+/* ABI v4（内核 6.7+）网络位：deny-all 语义 = handled 置位且不加任何 net 规则 */
+#define LL_NET_BIND_TCP    (1ULL << 0)
+#define LL_NET_CONNECT_TCP (1ULL << 1)
+#define LL_NET_ALL (LL_NET_BIND_TCP | LL_NET_CONNECT_TCP)
+#define LL_CREATE_RULESET_VERSION (1U << 0)
 
 #define LL_RW (LL_HANDLED_ALL & ~LANDLOCK_ACCESS_FS_EXECUTE)
 #define LL_ROX (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | \
@@ -82,7 +90,19 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    ruleset_fd = syscall(LL_CREATE_RULESET, &attr, sizeof(attr), 0);
+    /* M1 修复：ABI >= 4 时把 TCP bind/connect 纳入 handled（无 net 规则 = 全拒）。
+       ABI < 4 无法经 Landlock 强制网络 → 打印诚实告警（调用方容器层 --network none 兜底）。 */
+    int net_enforced = 0;
+    long abi = syscall(LL_CREATE_RULESET, NULL, 0, LL_CREATE_RULESET_VERSION);
+    if (abi >= 4) {
+        attr.handled_access_net = LL_NET_ALL;
+        net_enforced = 1;
+    } else if (abi >= 0) {
+        fprintf(stderr, "[llandlock] warn: kernel Landlock ABI %ld < 4，网络不受内核强制\n", abi);
+    }
+
+    size_t attr_size = net_enforced ? sizeof(attr) : sizeof(attr.handled_access_fs);
+    ruleset_fd = syscall(LL_CREATE_RULESET, &attr, attr_size, 0);
     if (ruleset_fd < 0) {
         fprintf(stderr, "[llandlock] kernel Landlock unavailable: %s\n", strerror(errno));
         return 126;

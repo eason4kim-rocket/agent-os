@@ -19,6 +19,8 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
     pub enforcement: String,
+    /// policy.network=false 时，网络是否真的被强制（M1：如实记录，不虚报）
+    pub network_enforced: bool,
 }
 
 pub trait Executor: Send + Sync {
@@ -121,7 +123,8 @@ impl Executor for PlainExecutor {
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]).current_dir(policy.workdir());
         let (rc, out, err) = run_with_timeout(&mut cmd, stdin, Duration::from_secs(60));
-        ExecResult { rc, stdout: out, stderr: err, enforcement: self.enforcement().into() }
+        ExecResult { rc, stdout: out, stderr: err, enforcement: self.enforcement().into(),
+                     network_enforced: false } // plain 无网络隔离，如实记录
     }
 }
 
@@ -140,6 +143,16 @@ impl Executor for LandlockExecutor {
         "kernel-native"
     }
     fn execute(&self, policy: &Policy, argv: &[String], stdin: Option<&str>) -> ExecResult {
+        // H-2 修复：不虚报——与 llrun 同口径探测内核 ABI；不支持时如实 false
+        let network_enforced = if policy.network {
+            false // 允许联网的策略没有"强制禁网"语义——如实 false
+        } else {
+            #[cfg(target_os = "linux")]
+            let supported = crate::landlock::network_supported();
+            #[cfg(not(target_os = "linux"))]
+            let supported = false;
+            supported
+        };
         let mut cmd = Command::new(&self.llrun_path);
         cmd.arg("--rw").arg(policy.workdir());
         for d in &self.rox_dirs {
@@ -147,7 +160,8 @@ impl Executor for LandlockExecutor {
         }
         cmd.arg("--").args(argv).current_dir(policy.workdir());
         let (rc, out, err) = run_with_timeout(&mut cmd, stdin, Duration::from_secs(120));
-        ExecResult { rc, stdout: out, stderr: err, enforcement: self.enforcement().into() }
+        ExecResult { rc, stdout: out, stderr: err, enforcement: self.enforcement().into(),
+                     network_enforced }
     }
 }
 

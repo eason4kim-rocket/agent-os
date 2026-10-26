@@ -94,7 +94,7 @@ fn d3_network_policy_rejected_at_load() {
     assert!(!installed.iter().any(|p| p == "net"));
 }
 
-/// D7：大输出（>64KiB 管道容量）正常返回，不得假超时（M2 回归）
+/// D7：大输出（2MiB > 64KiB 管道容量）正常返回，不得假超时（M2 回归）
 #[test]
 fn d7_large_output_no_fake_timeout() {
     let (sock, state, work) = setup("d7", |w| vec![("default".into(), default_policy(w))], None);
@@ -215,6 +215,53 @@ fn d9_ledger_verify_rejects_forged_identity() {
     assert!(err.reason.contains("签名身份不在锚点记录中"), "实际: {}", err.reason);
 }
 
+/// L5：原地换公钥（保留原签名、链内合法重建）→ verify 必须报"身份签名不匹配"
+#[test]
+fn l5_in_place_pubkey_swap_detected() {
+    use agentos_core::ledger::{canonical, Ledger, GENESIS};
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
+
+    let dir = std::env::temp_dir().join(format!("agentos-l5-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ledger.jsonl");
+
+    // 真实身份 A 签一条合法事件
+    let sk_a = SigningKey::from_bytes(&[1u8; 32]);
+    let policy = json!({"schema": "agentos.policy.v0", "workdir": "/tmp/work", "extra_read": [],
+                        "allow_commands": ["ls"], "network": false, "backend": "auto", "max_steps": 24});
+    let policy_digest = hex(&Sha256::digest(canonical(&policy).as_bytes()));
+    let sig_a = sk_a.sign(&hex_decode(&policy_digest).unwrap());
+
+    // 账本行里的公钥被换成 B、签名仍是 A 的 → 链内合法重算后，签名核验必须拒绝
+    let sk_b = SigningKey::from_bytes(&[2u8; 32]);
+    let pk_b = hex(&sk_b.verifying_key().to_bytes());
+
+    let entry = json!({
+        "schema": "agentos.ledger.v0", "seq": 1, "ts": "t", "run": "l5",
+        "event": "run.start", "detail": {"policy": policy, "agent_pubkey": pk_b,
+            "signed": policy_digest, "agent_sig": hex(&sig_a.to_bytes())},
+        "prev": GENESIS, "hash": ""
+    });
+    let mut no_hash = entry.clone();
+    if let Some(o) = no_hash.as_object_mut() {
+        o.remove("hash");
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(GENESIS.as_bytes());
+    hasher.update(canonical(&no_hash).as_bytes());
+    let mut entry = entry;
+    entry["hash"] = json!(hex(&hasher.finalize()));
+    std::fs::write(&path, canonical(&entry) + "\n").unwrap();
+
+    let err = Ledger::load(&path)
+        .verify(None)
+        .expect_err("换公钥保留原签名必须被检出");
+    assert!(err.reason.contains("身份签名"), "实际: {}", err.reason);
+}
+
+/// L1/L3/L4（Rust）：空账本、锚点截断、坏行
+
 /// L1/L3/L4（Rust）：空账本、锚点截断、坏行
 #[test]
 fn l_series_ledger_edges_rust() {
@@ -277,4 +324,54 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
     (0..s.len() / 2)
         .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| ()))
         .collect()
+}
+
+/// N1（M1 回归，仅 Linux）：策略禁网时，Landlock ABI>=4 内核拒绝 TCP 出网
+#[cfg(target_os = "linux")]
+#[test]
+fn n1_network_denied_by_kernel() {
+    use agentos_core::exec::{LandlockExecutor, Executor};
+    use std::process::{Command, Stdio};
+    let llrun = PathBuf::from(env!("CARGO_BIN_EXE_llrun"));
+    let work = temp_dir("n1-work");
+    std::fs::write(work.join("a.txt"), "hello").unwrap();
+    let policy = agentos_core::policy::Policy {
+        schema: agentos_core::policy::SCHEMA.into(),
+        workdir: work.to_string_lossy().into(),
+        extra_read: vec![],
+        allow_commands: vec!["bash".into(), "cat".into()],
+        network: false,
+        backend: "auto".into(),
+        max_steps: 24,
+    };
+    let ex = LandlockExecutor {
+        llrun_path: llrun,
+        rox_dirs: vec!["/bin".into(), "/usr/bin".into(), "/lib".into(), "/usr/lib".into()],
+    };
+    assert!(ex.available(), "llrun 不可用（N1 需要它）");
+
+    // 对照：笼内文件读取正常（说明沙箱本身工作）
+    let ok = ex.execute(&policy, &["cat".into(), "a.txt".into()], None);
+    assert_eq!(ok.rc, 0, "正向对照失败: {}", ok.stderr);
+
+    // 正向对照：沙箱外直连必须成功——runner 无出网则诚实跳过（优于假绿）
+    let control = Command::new("timeout")
+        .args(["5", "bash", "-c", "exec 3<>/dev/tcp/1.1.1.1/80"])
+        .stdout(Stdio::null()).stderr(Stdio::null())
+        .status().expect("bash 不可用");
+    if !control.success() {
+        eprintln!("[n1] 跳过：runner 无出网，正向对照失败");
+        return;
+    }
+
+    // 内核拒网：同一 connect 在笼内必须被拒（EACCES → bash 报 Permission denied）
+    let net = ex.execute(
+        &policy,
+        &["bash".into(), "-c".into(), "exec 3<>/dev/tcp/1.1.1.1/80".into()],
+        None,
+    );
+    assert_ne!(net.rc, 0, "网络未被强制（出网成功）: {}", net.stderr);
+    assert!(net.stderr.contains("Permission denied"),
+            "预期内核 EACCES 拒绝，实际: {}", net.stderr);
+    assert!(net.network_enforced);
 }

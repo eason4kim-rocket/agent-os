@@ -29,6 +29,7 @@ class SandboxResult:
     denied: bool = False
     reason: str = ""
     enforcement: str = ""  # M5：实际强制级别，由后端如实填写并记入账本
+    network_enforced: bool | None = None  # M1：网络是否真的被强制；None=未知/不适用
 
 
 def _run_pguarded(argv: list[str], cwd: str | None, stdin: str | None,
@@ -87,7 +88,7 @@ class PlainSandbox(Sandbox):
             return blocked
         rc, out, err = _run_pguarded(argv, cwd=str(policy.resolved_workdir()),
                                      stdin=stdin, timeout=60)
-        return SandboxResult(rc, out, err, enforcement=self.enforcement)
+        return SandboxResult(rc, out, err, enforcement=self.enforcement, network_enforced=False)
 
 
 class DockerSandbox(Sandbox):
@@ -121,7 +122,7 @@ class DockerSandbox(Sandbox):
             "-w", "/work", self.IMAGE,
         ] + argv
         rc, out, err = _run_pguarded(docker_argv, cwd=None, stdin=stdin, timeout=120)
-        return SandboxResult(rc, out, err, enforcement=self.enforcement)
+        return SandboxResult(rc, out, err, enforcement=self.enforcement, network_enforced=True)
 
 
 class LandlockSandbox(Sandbox):
@@ -208,7 +209,7 @@ class LandlockSandbox(Sandbox):
             docker_argv += ["-v", f"{Path(str(r)).resolve()}:{name}:ro", "--ro", name]
         docker_argv += ["--"] + argv
         rc, out, err = _run_pguarded(docker_argv, cwd=None, stdin=stdin, timeout=120)
-        return SandboxResult(rc, out, err, enforcement=self.enforcement)
+        return SandboxResult(rc, out, err, enforcement=self.enforcement, network_enforced=True)
 
 
 class SrtSandbox(Sandbox):
@@ -320,6 +321,7 @@ class AgentdSandbox(Sandbox):
             denied=denied,
             reason=str(r.get("stderr", "")) if denied else "",
             enforcement=str(r.get("enforcement", "unknown")),
+            network_enforced=r.get("network_enforced"),
         )
 
 

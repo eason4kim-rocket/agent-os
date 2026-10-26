@@ -1,7 +1,8 @@
 //! Landlock 内核强制（llandlock.c 的 Rust 原生移植）。
 //!
 //! 仅 Linux。 handled 集合覆盖 ABI v3 全部 FS 权限（含 REFER/TRUNCATE/MAKE_SYM）；
-//! 网络与 IOCTL_DEV 由调用方在容器层兜底（--network none）。
+//! ABI >= 4 时同时强制 TCP bind/connect deny-all（UDP/unix 不在此层，见 README 边界）；
+//! IOCTL_DEV（ABI v5）仍为已知缺口。
 
 use std::os::unix::io::AsRawFd;
 
@@ -31,6 +32,12 @@ const TRUNCATE: u64 = 1 << 14;
 
 const HANDLED_ALL: u64 = (1 << 15) - 1; // bits 0..=14，与上列全集一致
 
+// ABI v4（内核 6.7+）网络位：deny-all 语义 = handled 置位且不加任何 net 规则
+const NET_BIND_TCP: u64 = 1 << 0;
+const NET_CONNECT_TCP: u64 = 1 << 1;
+const NET_ALL: u64 = NET_BIND_TCP | NET_CONNECT_TCP;
+const LL_CREATE_RULESET_VERSION: u64 = 1;
+
 const RW: u64 = HANDLED_ALL & !EXECUTE;
 const ROX: u64 = EXECUTE | READ_FILE | READ_DIR;
 
@@ -38,6 +45,7 @@ const ROX: u64 = EXECUTE | READ_FILE | READ_DIR;
 #[derive(Default)]
 struct RulesetAttr {
     handled_access_fs: u64,
+    handled_access_net: u64, // ABI v4
 }
 
 #[repr(C, packed)]
@@ -46,13 +54,38 @@ struct PathBeneathAttr {
     parent_fd: i32,
 }
 
-fn create_ruleset() -> Result<i32, String> {
-    let attr = RulesetAttr { handled_access_fs: HANDLED_ALL };
+/// 内核是否支持 Landlock ABI v4+（网络强制前提）。供 executor 如实判定。
+pub fn network_supported() -> bool {
+    probe_abi() >= 4
+}
+
+fn probe_abi() -> i64 {
+    unsafe { libc::syscall(SYS_LLANDLOCK_CREATE_RULESET, std::ptr::null::<libc::c_void>(), 0 as libc::size_t, LL_CREATE_RULESET_VERSION as libc::c_uint) as i64 }
+}
+
+fn create_ruleset(deny_net: bool) -> Result<i32, String> {
+    let abi = probe_abi();
+    let net_enforced = deny_net && abi >= 4;
+    if deny_net && abi >= 0 && abi < 4 {
+        eprintln!("[llrun] warn: kernel Landlock ABI {abi} < 4，网络不受内核强制");
+    }
+    if deny_net && abi < 0 {
+        eprintln!("[llrun] warn: 内核不支持 Landlock，网络不受内核强制");
+    }
+    let attr = RulesetAttr {
+        handled_access_fs: HANDLED_ALL,
+        handled_access_net: if net_enforced { NET_ALL } else { 0 },
+    };
+    let size = if net_enforced {
+        std::mem::size_of::<RulesetAttr>()
+    } else {
+        std::mem::size_of::<u64>()
+    };
     let fd = unsafe {
         libc::syscall(
             SYS_LLANDLOCK_CREATE_RULESET,
             &attr as *const RulesetAttr,
-            std::mem::size_of::<RulesetAttr>() as libc::size_t,
+            size as libc::size_t,
             0 as libc::c_uint,
         )
     };
@@ -90,7 +123,7 @@ fn add_path(ruleset_fd: i32, path: &str, access: u64) -> Result<(), String> {
 
 /// 应用策略并执行命令（execvp 语义：成功则不返回）。
 pub fn run(rw: &[String], rox: &[String], argv: &[String]) -> Result<(), i32> {
-    let ruleset_fd = match create_ruleset() {
+    let ruleset_fd = match create_ruleset(/* deny_net: v0 策略一律禁网 */ true) {
         Ok(fd) => fd,
         Err(e) => {
             eprintln!("[llrun] {e}");
