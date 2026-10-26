@@ -215,6 +215,53 @@ fn d9_ledger_verify_rejects_forged_identity() {
     assert!(err.reason.contains("签名身份不在锚点记录中"), "实际: {}", err.reason);
 }
 
+/// L5：原地换公钥（保留原签名、链内合法重建）→ verify 必须报"身份签名不匹配"
+#[test]
+fn l5_in_place_pubkey_swap_detected() {
+    use agentos_core::ledger::{canonical, Ledger, GENESIS};
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
+
+    let dir = std::env::temp_dir().join(format!("agentos-l5-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ledger.jsonl");
+
+    // 真实身份 A 签一条合法事件
+    let sk_a = SigningKey::from_bytes(&[1u8; 32]);
+    let policy = json!({"schema": "agentos.policy.v0", "workdir": "/tmp/work", "extra_read": [],
+                        "allow_commands": ["ls"], "network": false, "backend": "auto", "max_steps": 24});
+    let policy_digest = hex(&Sha256::digest(canonical(&policy).as_bytes()));
+    let sig_a = sk_a.sign(&hex_decode(&policy_digest).unwrap());
+
+    // 账本行里的公钥被换成 B、签名仍是 A 的 → 链内合法重算后，签名核验必须拒绝
+    let sk_b = SigningKey::from_bytes(&[2u8; 32]);
+    let pk_b = hex(&sk_b.verifying_key().to_bytes());
+
+    let entry = json!({
+        "schema": "agentos.ledger.v0", "seq": 1, "ts": "t", "run": "l5",
+        "event": "run.start", "detail": {"policy": policy, "agent_pubkey": pk_b,
+            "signed": policy_digest, "agent_sig": hex(&sig_a.to_bytes())},
+        "prev": GENESIS, "hash": ""
+    });
+    let mut no_hash = entry.clone();
+    if let Some(o) = no_hash.as_object_mut() {
+        o.remove("hash");
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(GENESIS.as_bytes());
+    hasher.update(canonical(&no_hash).as_bytes());
+    let mut entry = entry;
+    entry["hash"] = json!(hex(&hasher.finalize()));
+    std::fs::write(&path, canonical(&entry) + "\n").unwrap();
+
+    let err = Ledger::load(&path)
+        .verify(None)
+        .expect_err("换公钥保留原签名必须被检出");
+    assert!(err.reason.contains("身份签名"), "实际: {}", err.reason);
+}
+
+/// L1/L3/L4（Rust）：空账本、锚点截断、坏行
+
 /// L1/L3/L4（Rust）：空账本、锚点截断、坏行
 #[test]
 fn l_series_ledger_edges_rust() {
@@ -308,8 +355,8 @@ fn n1_network_denied_by_kernel() {
     assert_eq!(ok.rc, 0, "正向对照失败: {}", ok.stderr);
 
     // 正向对照：沙箱外直连必须成功——runner 无出网则诚实跳过（优于假绿）
-    let control = Command::new("bash")
-        .args(["-c", "exec 3<>/dev/tcp/1.1.1.1/80"])
+    let control = Command::new("timeout")
+        .args(["5", "bash", "-c", "exec 3<>/dev/tcp/1.1.1.1/80"])
         .stdout(Stdio::null()).stderr(Stdio::null())
         .status().expect("bash 不可用");
     if !control.success() {

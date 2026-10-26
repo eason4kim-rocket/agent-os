@@ -6,9 +6,11 @@
  *   --rox PATH  allow read + execute beneath PATH
  *
  * Uses the official UAPI header (linux-libc-dev). Handled access rights cover
- * ABI v3 (filesystem incl. REFER/TRUNCATE/MAKE_SYM). Network restriction and
- * IOCTL_DEV (ABI v4/v5) are out of scope here: the caller runs the process in a
- * network-less container (defense in depth); IOCTL_DEV gap is documented.
+ * ABI v3 (filesystem incl. REFER/TRUNCATE/MAKE_SYM). On ABI >= 4 (kernel 6.7+)
+ * TCP bind/connect are ALSO denied (deny-all: handled bits set, no net rules);
+ * UDP/ICMP/unix-socket restrictions remain outside Landlock's scope (documented).
+ * IOCTL_DEV (ABI v5) gap is documented. Below v4, callers MUST provide network
+ * isolation at the container/VM layer (a warning is printed).
  */
 #define _GNU_SOURCE
 #include <errno.h>

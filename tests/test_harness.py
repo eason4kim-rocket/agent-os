@@ -129,9 +129,22 @@ class LedgerTest(unittest.TestCase):
                         signed=digest, agent_sig=sig.hex())
         ok, _, _ = self.led.verify()
         self.assertTrue(ok)
-        # 换身份重放：签名对不上
+        # L5：原地换公钥（保留原签名）→ 链内合法重算后，verify() 必须报"身份签名不匹配"
+        import json as _json
         e = self.led.entries[-1]
         e["detail"]["agent_pubkey"] = ("ff" * 32)
+        from harness.ledger import GENESIS
+        no_hash = {k: v for k, v in e.items() if k != "hash"}
+        digest = hashlib.sha256(
+            (GENESIS + json.dumps(no_hash, sort_keys=True, ensure_ascii=False,
+                                  separators=(",", ":"))).encode()).hexdigest()
+        e["hash"] = digest
+        self.path.write_text(json.dumps(e, sort_keys=True, ensure_ascii=False,
+                                        separators=(",", ":")) + "\n", encoding="utf-8")
+        ok, _, why = Ledger(self.path).verify()
+        self.assertFalse(ok)
+        self.assertIn("身份签名", why)
+        # 底层原语：签名对不上
         self.assertFalse(ed25519.checkvalid(
             bytes.fromhex(e["detail"]["agent_sig"]),
             bytes.fromhex(e["detail"]["signed"]),

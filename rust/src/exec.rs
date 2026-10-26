@@ -145,7 +145,7 @@ impl Executor for LandlockExecutor {
     fn execute(&self, policy: &Policy, argv: &[String], stdin: Option<&str>) -> ExecResult {
         // H-2 修复：不虚报——与 llrun 同口径探测内核 ABI；不支持时如实 false
         let network_enforced = if policy.network {
-            true // 允许联网的策略无"强制禁网"可言
+            false // 允许联网的策略没有"强制禁网"语义——如实 false
         } else {
             #[cfg(target_os = "linux")]
             let supported = crate::landlock::network_supported();

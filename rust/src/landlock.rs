@@ -1,7 +1,8 @@
 //! Landlock 内核强制（llandlock.c 的 Rust 原生移植）。
 //!
 //! 仅 Linux。 handled 集合覆盖 ABI v3 全部 FS 权限（含 REFER/TRUNCATE/MAKE_SYM）；
-//! 网络与 IOCTL_DEV 由调用方在容器层兜底（--network none）。
+//! ABI >= 4 时同时强制 TCP bind/connect deny-all（UDP/unix 不在此层，见 README 边界）；
+//! IOCTL_DEV（ABI v5）仍为已知缺口。
 
 use std::os::unix::io::AsRawFd;
 
@@ -65,8 +66,11 @@ fn probe_abi() -> i64 {
 fn create_ruleset(deny_net: bool) -> Result<i32, String> {
     let abi = probe_abi();
     let net_enforced = deny_net && abi >= 4;
-    if deny_net && abi < 4 {
+    if deny_net && abi >= 0 && abi < 4 {
         eprintln!("[llrun] warn: kernel Landlock ABI {abi} < 4，网络不受内核强制");
+    }
+    if deny_net && abi < 0 {
+        eprintln!("[llrun] warn: 内核不支持 Landlock，网络不受内核强制");
     }
     let attr = RulesetAttr {
         handled_access_fs: HANDLED_ALL,
