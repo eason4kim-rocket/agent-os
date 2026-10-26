@@ -14,16 +14,18 @@ jobs:
           ./bin/agentos run --task tasks/demo-organize.md --mock --verifier verifiers/demo_organization.py
           ./bin/agentos verify
       - name: schema conformance
-        run: python3 -c "
-import json, sys
-sys.path.insert(0, '.')
-from harness.policy import Policy
-schema = json.load(open('schemas/policy.schema.json'))
-p = Policy(workdir='workspace/demo').to_dict()
-assert p['schema'] == schema['properties']['schema']['const']
-assert all(k in p for k in schema['required'])
-assert p['backend'] in schema['properties']['backend']['enum']
-print('conformance ok')"
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys
+          sys.path.insert(0, '.')
+          from harness.policy import Policy
+          schema = json.load(open('schemas/policy.schema.json'))
+          p = Policy(workdir='workspace/demo').to_dict()
+          assert p['schema'] == schema['properties']['schema']['const']
+          assert all(k in p for k in schema['required'])
+          assert p['backend'] in schema['properties']['backend']['enum']
+          print('conformance ok')
+          PYEOF
 
   rust:
     runs-on: ubuntu-latest
