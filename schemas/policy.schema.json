@@ -48,7 +48,8 @@
         "plain",
         "docker",
         "landlock",
-        "srt"
+        "srt",
+        "agentd"
       ],
       "default": "auto",
       "description": "Enforcement backend preference; auto degrades kernel-native > container > software. The actual level used MUST be recorded in the ledger"

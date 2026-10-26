@@ -252,6 +252,74 @@ class SrtSandbox(Sandbox):
         return SandboxResult(rc, out, err)
 
 
+class AgentdSandbox(Sandbox):
+    """经由常驻 agentd（Rust 守护进程）执行——"客户端大脑 + 内核执行"架构。
+
+    协议：Unix socket NDJSON（见 rust/src/daemon.rs）。工具调用逐条发给 daemon：
+    {"cmd":"exec","params":{"policy":..., "argv":..., "stdin":...,"wait":true}}
+    daemon 侧独立记账并按其执行器（llrun/Landlock 或 plain）强制。
+
+    注：写原语 tee 需出现在 allow_commands 中（客户端声明、daemon 内核强制）——
+    cli 在 agentd 后端会自动附加。
+    """
+
+    name = "agentd"
+    enforcement = "via-agentd"  # 实际级别由 daemon 返回并记入账本
+
+    def __init__(self, socket_path: Path):
+        self.socket = Path(socket_path)
+
+    def available(self) -> bool:
+        return self.socket.exists()
+
+    def execute(self, argv, policy, stdin=None, internal=False):
+        blocked = self._precheck(argv, policy, internal)
+        if blocked:
+            return blocked
+        import json as _json
+        import socket as _socket
+        req = {
+            "id": "harness",
+            "cmd": "exec",
+            "params": {
+                "policy": policy.to_dict(),
+                "argv": argv,
+                "wait": True,
+            },
+        }
+        if stdin is not None:
+            req["params"]["stdin"] = stdin
+        try:
+            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            s.settimeout(180)
+            s.connect(str(self.socket))
+            with s:
+                s.sendall((_json.dumps(req) + "\n").encode("utf-8"))
+                buf = b""
+                while b"\n" not in buf:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+        except OSError as e:
+            return SandboxResult(125, "", f"[agentd] 连接失败: {e}")
+        try:
+            resp = _json.loads(buf.decode("utf-8").splitlines()[0])
+        except (json.JSONDecodeError, IndexError):
+            return SandboxResult(125, "", "[agentd] daemon 响应无法解析")
+        if not resp.get("ok"):
+            return SandboxResult(125, "", f"[agentd] {resp.get('error', '未知错误')}")
+        r = resp.get("result", {})
+        denied = bool(r.get("denied"))
+        return SandboxResult(
+            rc=int(r.get("rc", -1)),
+            stdout=str(r.get("stdout", "")),
+            stderr=str(r.get("stderr", "")),
+            denied=denied,
+            reason=str(r.get("stderr", "")) if denied else "",
+        )
+
+
 def select_backend(policy: Policy) -> Sandbox:
     """auto：优先内核原生，其次容器，最后软件层。选择结果如实入账本。"""
     order: list[type[Sandbox]] = [SrtSandbox, LandlockSandbox, DockerSandbox, PlainSandbox]
