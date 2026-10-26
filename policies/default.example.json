@@ -1,0 +1,9 @@
+{
+  "schema": "agentos.policy.v0",
+  "workdir": "/home/you/agentos-work",
+  "extra_read": [],
+  "allow_commands": ["ls", "cat", "head", "tail", "grep", "wc", "mkdir", "mv", "cp", "echo", "tee"],
+  "network": false,
+  "backend": "auto",
+  "max_steps": 24
+}

@@ -123,7 +123,8 @@ def _dispatch(name: str, args: dict, policy: Policy, sb: Sandbox,
             return f"[策略拒绝] {why}", False
         res = sb.execute(argv, policy)
         on_event("tool.result", tool="run_command", command=raw, rc=res.rc,
-                 denied=res.denied, reason=res.reason if res.denied else None)
+                 denied=res.denied, reason=res.reason if res.denied else None,
+                 enforcement=getattr(res, "enforcement", ""))
         return _fmt(res), False
 
     return f"[未知工具] {name}", False

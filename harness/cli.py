@@ -30,12 +30,14 @@ def cmd_run(args):
     policy = Policy(workdir=wd, backend=args.backend, max_steps=args.max_steps)
     if args.backend == "agentd":
         from harness.sandbox import AgentdSandbox
-        sb = AgentdSandbox(Path(getattr(args, "agentd_socket", "/tmp/agentos.sock")))
-        # 写原语 tee 是工具实现细节：客户端声明、daemon 内核强制写路径
-        policy.allow_commands = policy.allow_commands + ("tee",)
+        sb = AgentdSandbox(Path(getattr(args, "agentd_socket", "/tmp/agentos.sock")),
+                           policy_name=getattr(args, "agentd_policy", "default"))
+        # H1 修复：exec 只引用 daemon 侧【已安装策略】的名称；权限由操作者安装在
+        # daemon state_dir/policies/ 下，socket 客户端无法自拟。
         if not sb.available():
             raise SystemExit(f"agentd 后端不可用：socket 不存在（{sb.socket}）。"
-                             f"请先启动 daemon：cargo run --bin agentd -- --socket {sb.socket}")
+                             f"请先启动 daemon，并确认已安装策略 '{sb.policy_name}'"
+                             f"（放置于 daemon state_dir/policies/<名>.json）")
     else:
         sb = select_backend(policy)
         if args.backend != "auto" and sb.name != args.backend:
@@ -126,6 +128,8 @@ def main():
                        choices=["auto", "plain", "docker", "landlock", "srt", "agentd"])
     p_run.add_argument("--agentd-socket", dest="agentd_socket",
                        default="/tmp/agentos.sock", help="agentd Unix socket 路径")
+    p_run.add_argument("--agentd-policy", dest="agentd_policy",
+                       default="default", help="agentd 已安装策略名")
     p_run.add_argument("--mock", action="store_true", help="免 key 剧本模式")
     p_run.add_argument("--max-steps", type=int, default=24)
 

@@ -1,8 +1,11 @@
 //! Agent 身份（P2 v0 的 Rust 侧）：ed25519 密钥对，文件布局与 Python 互通。
 //! identity/agent.seed（32 字节，0600）= 私钥种子；agent.pub = 公钥。
+//!
+//! H3 修复：seed 写入显式 mode(060)（红队实测 fs::write 默认落 0644）；
+//! 已存在但权限过宽的 seed 拒绝加载（fail-closed）；身份目录 0700。
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub struct Identity {
@@ -14,12 +17,32 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 加载或生成身份（seed 不存在则从 /dev/urandom 生成，文件 0600）。
+/// 加载或生成身份。已存在的 seed 权限过宽（组/其他人可读）时拒绝加载。
 pub fn ensure(state_dir: &Path) -> std::io::Result<Identity> {
     let d = state_dir.join("identity");
+    std::fs::create_dir_all(&d)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700))?;
+    }
     let seed_file = d.join("agent.seed");
     let pub_file = d.join("agent.pub");
     let seed: [u8; 32] = if seed_file.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&seed_file)?.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "身份种子权限过宽（{:03o}），拒绝加载；请 chmod 600 后重试",
+                        mode
+                    ),
+                ));
+            }
+        }
         let raw = std::fs::read(&seed_file)?;
         raw.try_into().map_err(|v: Vec<u8>| {
             std::io::Error::new(
@@ -29,8 +52,19 @@ pub fn ensure(state_dir: &Path) -> std::io::Result<Identity> {
         })?
     } else {
         let mut seed = [0u8; 32];
-        std::fs::create_dir_all(&d)?;
         std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .write(true)
+                .open(&seed_file)?
+                .write_all(&seed)?;
+        }
+        #[cfg(not(unix))]
         std::fs::write(&seed_file, seed)?;
         seed
     };
