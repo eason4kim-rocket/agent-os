@@ -28,10 +28,19 @@ def cmd_run(args):
         raise SystemExit(f"工作目录不存在: {wd}")
     task = Path(args.task).read_text(encoding="utf-8") if args.task else "整理当前目录的文件。"
     policy = Policy(workdir=wd, backend=args.backend, max_steps=args.max_steps)
-    sb = select_backend(policy)
-    if args.backend != "auto" and sb.name != args.backend:
-        raise SystemExit(f"后端 '{args.backend}' 不可用（当前回退为 '{sb.name}'）。"
-                         f"请安装对应依赖或改用 --backend auto/plain。")
+    if args.backend == "agentd":
+        from harness.sandbox import AgentdSandbox
+        sb = AgentdSandbox(Path(getattr(args, "agentd_socket", "/tmp/agentos.sock")))
+        # 写原语 tee 是工具实现细节：客户端声明、daemon 内核强制写路径
+        policy.allow_commands = policy.allow_commands + ("tee",)
+        if not sb.available():
+            raise SystemExit(f"agentd 后端不可用：socket 不存在（{sb.socket}）。"
+                             f"请先启动 daemon：cargo run --bin agentd -- --socket {sb.socket}")
+    else:
+        sb = select_backend(policy)
+        if args.backend != "auto" and sb.name != args.backend:
+            raise SystemExit(f"后端 '{args.backend}' 不可用（当前回退为 '{sb.name}'）。"
+                             f"请安装对应依赖或改用 --backend auto/plain。")
     ledger = Ledger(state / "ledger.jsonl")
     snaps = SnapshotManager(wd, state)
     model = MockModel() if (args.mock or not os.environ.get("AGENTOS_API_KEY")) else GLMModel()
@@ -114,7 +123,9 @@ def main():
     p_run.add_argument("--task", help="任务书 markdown 文件")
     p_run.add_argument("--verifier", help="验收器脚本（读 stdin JSON，输出 passed 判定）")
     p_run.add_argument("--backend", default="auto",
-                       choices=["auto", "plain", "docker", "landlock", "srt"])
+                       choices=["auto", "plain", "docker", "landlock", "srt", "agentd"])
+    p_run.add_argument("--agentd-socket", dest="agentd_socket",
+                       default="/tmp/agentos.sock", help="agentd Unix socket 路径")
     p_run.add_argument("--mock", action="store_true", help="免 key 剧本模式")
     p_run.add_argument("--max-steps", type=int, default=24)
 
