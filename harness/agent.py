@@ -6,12 +6,14 @@ run.end 都会落账，沙箱后端的生命周期钩子（begin/end）都会配
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
 import uuid
 from datetime import datetime
 
+from . import identity as ident
 from .ledger import Ledger
 from .model import Reply
 from .policy import Policy
@@ -51,8 +53,15 @@ class AgentRunner:
         run = datetime.now().strftime("%Y%m%d") + "-" + uuid.uuid4().hex[:8]
         backend = f"{self.sb.name}/{self.sb.enforcement}"
 
+        # P2 身份签名 v0：Agent 私钥对策略摘要签名，公钥与签名入 run.start
+        seed, pk = ident.ensure_identity(self.ledger.path.parent)
+        policy_digest = __import__("hashlib").sha256(
+            json.dumps(self.policy.to_dict(), sort_keys=True, ensure_ascii=False,
+                       separators=(",", ":")).encode("utf-8")).hexdigest()
+        policy_sig = ident.sign_digest(seed, bytes.fromhex(policy_digest))
         self._event("run.start", run, task=task_text[:200], policy=self.policy.to_dict(),
-                    backend=backend)
+                    backend=backend, agent_pubkey=pk.hex(),
+                    signed=policy_digest, agent_sig=policy_sig.hex())
         self._say(f"[笼子] {backend}｜读写区 {self.policy.resolved_workdir()}｜"
                   f"命令白名单 {len(self.policy.allow_commands)} 项｜断网")
         if hasattr(self.sb, "begin"):
@@ -77,7 +86,11 @@ class AgentRunner:
         def end_run(how: str, **extra):
             if not ended["flag"]:
                 ended["flag"] = True
-                self._event("run.end", run, how=how, report=report[:500], **extra)
+                report_digest = hashlib.sha256(f"{how}|{report}".encode("utf-8")).hexdigest()
+                sig = ident.sign_digest(seed, bytes.fromhex(report_digest))
+                self._event("run.end", run, how=how, report=report[:500],
+                            agent_pubkey=pk.hex(), signed=report_digest,
+                            agent_sig=sig.hex(), **extra)
 
         try:
             for _ in range(self.policy.max_steps):

@@ -1,0 +1,26 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: unit tests
+        run: python3 -m unittest discover tests -v
+      - name: mock demo end-to-end
+        run: |
+          ./bin/agentos run --task tasks/demo-organize.md --mock --verifier verifiers/demo_organization.py
+          ./bin/agentos verify
+      - name: schema conformance
+        run: python3 -c "
+import json, sys
+sys.path.insert(0, '.')
+from harness.policy import Policy
+schema = json.load(open('schemas/policy.schema.json'))
+p = Policy(workdir='workspace/demo').to_dict()
+assert p['schema'] == schema['properties']['schema']['const']
+assert all(k in p for k in schema['required'])
+assert p['backend'] in schema['properties']['backend']['enum']
+print('conformance ok')"

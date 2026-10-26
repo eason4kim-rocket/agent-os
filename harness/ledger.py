@@ -84,16 +84,22 @@ class Ledger:
         return entry
 
     def anchor(self, anchor_path: Path) -> dict:
-        """把当前链头 (count, hash) 写到账本之外的锚点文件（防整体重放/截断）。"""
+        """把链头 (count, hash) 与出现过的 Agent 公钥写到账本之外的锚点文件。
+
+        锚点防"整体重放/截断/换身份重建"；锚点文件本身由操作者保管（可再签名/上链）。
+        """
         head = self.entries[-1]["hash"] if self.entries else GENESIS
+        pubkeys = sorted({e["detail"]["agent_pubkey"] for e in self.entries
+                          if "agent_pubkey" in e.get("detail", {})})
         anchor = {"schema": "agentos.ledger.anchor.v0",
-                  "count": len(self.entries), "head": head}
+                  "count": len(self.entries), "head": head, "agent_pubkeys": pubkeys}
         anchor_path.parent.mkdir(parents=True, exist_ok=True)
         anchor_path.write_text(_canonical(anchor) + "\n", encoding="utf-8")
         return anchor
 
     def verify(self, anchor_path: Path | None = None) -> tuple[bool, int, str]:
-        """重算全链 + 核对锚点。返回 (是否完整, 账本总条数, 首个坏点描述)。"""
+        """重算全链 + 核对锚点 + 验证身份签名。返回 (是否完整, 总条数, 首个坏点描述)。"""
+        from . import ed25519
         prev = GENESIS
         for i, e in enumerate(self.entries):
             if e.get("corrupt"):
@@ -103,6 +109,16 @@ class Ledger:
                 return False, len(self.entries), f"seq {e.get('seq')}: prev-hash 链断裂"
             if e.get("hash") != _digest(prev, expect):
                 return False, len(self.entries), f"seq {e.get('seq')}: 内容哈希不匹配（事件被篡改）"
+            d = e.get("detail", {})
+            if "agent_sig" in d:  # P2 身份签名核验（v0：签名对象为 signed 摘要字段）
+                try:
+                    if not ed25519.checkvalid(bytes.fromhex(d["agent_sig"]),
+                                              bytes.fromhex(d["signed"]),
+                                              bytes.fromhex(d["agent_pubkey"])):
+                        return False, len(self.entries), \
+                            f"seq {e.get('seq')}: 身份签名不匹配（伪造的 Agent 身份）"
+                except (KeyError, ValueError):
+                    return False, len(self.entries), f"seq {e.get('seq')}: 签名字段损坏"
             prev = e["hash"]
         if anchor_path is not None and Path(anchor_path).exists():
             try:
@@ -114,6 +130,13 @@ class Ledger:
                 return False, len(self.entries), f"账本被截断：锚点记录 {n} 条，现存 {len(self.entries)} 条"
             if n and self.entries[n - 1].get("hash") != head:
                 return False, n, f"锚点核对失败：第 {n} 条哈希与锚点不符（前缀被重放/重建）"
+            known = set(anchor.get("agent_pubkeys") or [])
+            if known:
+                for e in self.entries[:n]:
+                    pk = e.get("detail", {}).get("agent_pubkey")
+                    if pk and pk not in known:
+                        return False, len(self.entries), \
+                            f"seq {e.get('seq')}: 签名身份不在锚点记录中（换身份重建账本）"
         if not self.entries:
             return False, 0, "空账本（无事件可验）"
         return True, len(self.entries), ""

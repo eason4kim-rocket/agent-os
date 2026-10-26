@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from .agent import AgentRunner
+from . import identity as ident
 from .ledger import Ledger
 from .model import GLMModel, MockModel
 from .policy import Policy
@@ -87,6 +88,13 @@ def cmd_rollback(args):
     print(f"[读档] 已恢复到快照 {sid}（账本在 {state / 'ledger.jsonl'}，不受回滚影响）")
 
 
+def cmd_keygen(args):
+    wd, state = _paths(args.workdir)
+    seed, pk = ident.ensure_identity(state)
+    print(f"[身份] 公钥: {pk.hex()}")
+    print(f"[身份] 私钥种子: {state / 'identity' / 'agent.seed'}（0600，谁持有 seed 谁就是该 Agent）")
+
+
 def cmd_verify(args):
     wd, state = _paths(args.workdir)
     ok, count, first_bad = Ledger(state / "ledger.jsonl").verify(state / "ledger.anchor")
@@ -111,6 +119,7 @@ def main():
     p_run.add_argument("--max-steps", type=int, default=24)
 
     sub.add_parser("explain", help="把策略翻译成人类的确认卡（硬问题#1 第一刀）")
+    sub.add_parser("keygen", help="生成/查看 Agent 身份（ed25519 密钥对）")
 
     sub.add_parser("snapshots", help="列出快照")
     p_rb = sub.add_parser("rollback", help="回滚工作目录")
@@ -135,7 +144,8 @@ def main():
     args = ap.parse_args(argv)
     args.workdir = getattr(args, "workdir_sub", None) or args.workdir
     {"run": cmd_run, "snapshots": cmd_snapshots, "explain": cmd_explain,
-     "rollback": cmd_rollback, "verify": cmd_verify}[args.cmd](args)
+     "keygen": cmd_keygen, "rollback": cmd_rollback,
+     "verify": cmd_verify}[args.cmd](args)
 
 
 if __name__ == "__main__":
