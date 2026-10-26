@@ -28,12 +28,16 @@ def cmd_run(args):
     task = Path(args.task).read_text(encoding="utf-8") if args.task else "整理当前目录的文件。"
     policy = Policy(workdir=wd, backend=args.backend, max_steps=args.max_steps)
     sb = select_backend(policy)
+    if args.backend != "auto" and sb.name != args.backend:
+        raise SystemExit(f"后端 '{args.backend}' 不可用（当前回退为 '{sb.name}'）。"
+                         f"请安装对应依赖或改用 --backend auto/plain。")
     ledger = Ledger(state / "ledger.jsonl")
     snaps = SnapshotManager(wd, state)
     model = MockModel() if (args.mock or not os.environ.get("AGENTOS_API_KEY")) else GLMModel()
     mode = "mock" if isinstance(model, MockModel) else model.model
-    print(f"=== Agent OS 阶段0 harness｜模式: {mode}｜任务: {args.task or '(默认)'} ===")
+    print(f"=== Agent OS harness｜模式: {mode}｜后端: {sb.name} ({sb.enforcement})｜任务: {args.task or '(默认)'} ===")
     AgentRunner(policy, sb, ledger, snaps, model).run(task, verifier=args.verifier)
+    ledger.anchor(state / "ledger.anchor")
 
 
 def cmd_explain(args):
@@ -75,17 +79,19 @@ def cmd_rollback(args):
         if not ids:
             raise SystemExit("没有可用快照")
         sid = ids[-1]
-    ledger = Ledger(state / "ledger.jsonl")
-    ledger.append("snapshot.restored", run="manual", snapshot=sid)
-    snaps.restore(sid)
+    try:
+        snaps.restore(sid)  # 先恢复，成功才记账（M7：不让账本记"已恢复"的假话）
+    except (FileNotFoundError, ValueError) as e:
+        raise SystemExit(f"[读档失败] {e}")
+    Ledger(state / "ledger.jsonl").append("snapshot.restored", run="manual", snapshot=sid)
     print(f"[读档] 已恢复到快照 {sid}（账本在 {state / 'ledger.jsonl'}，不受回滚影响）")
 
 
 def cmd_verify(args):
     wd, state = _paths(args.workdir)
-    ok, count, first_bad = Ledger(state / "ledger.jsonl").verify()
+    ok, count, first_bad = Ledger(state / "ledger.jsonl").verify(state / "ledger.anchor")
     if ok:
-        print(f"[账本] ✔ 完整：{count} 条事件，哈希链无断裂，无篡改")
+        print(f"[账本] ✔ 完整：{count} 条事件，哈希链无断裂，锚点核对一致")
     else:
         print(f"[账本] ✘ 存疑：共 {count} 条，首个问题 → {first_bad}")
         sys.exit(1)

@@ -66,7 +66,8 @@ class MockModel:
         {"name": "list_dir", "arguments": {"path": "."}},
         {"name": "finish", "arguments": {"report":
             "已把 5 张发票按月份归入 2026-01 / 2026-02 / 2026-03 三个子目录。"
-            "期间两次越界被拒：读 ../secret.txt（策略层）与读 /etc/passwd（内核层）——符合预期。"}},
+            "期间两次越界被拒：读 ../secret.txt 与读 /etc/passwd "
+            "（分别由策略层/内核层拦截，具体层级取决于所用后端）——符合预期。"}},
     ]
 
     def __init__(self):

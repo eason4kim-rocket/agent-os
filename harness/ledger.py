@@ -1,19 +1,17 @@
-"""账本（Ledger）：防篡改的哈希链 JSONL。协议资产 P3 的 v0 草案。
+"""账本（Ledger）：哈希链 JSONL。协议资产 P3 的 v0 草案。
 
-格式（agentos.ledger.v0）：
-  每行一个 JSON 事件：
-    { seq, ts, run, event, detail, prev, hash }
-  hash = sha256( prev + canonical_json(entry_without_hash) )
-  首事件 prev 为 64 个 "0"。
-
-账本只追加（append-only）；verify() 重算全链，任何一处改动都会被察觉。
-账本存放在工作目录之外（工作目录会被回滚，账本不能跟着回滚）。
+诚实的安全边界（docs/ledger.format.md 同步声明）：
+- 哈希链防"原地篡改任意一行"——改任何字节都会断链
+- 哈希链不防"整文件重放/替换"和"删除尾部"——那需要外部锚点（anchor）或签名（v1）
+- anchor() 在每次 run 结束时把 (count, head_hash) 写到账本之外；verify() 会核对锚点
 """
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -31,42 +29,91 @@ def _digest(prev: str, entry: dict) -> str:
 class Ledger:
     def __init__(self, path: Path):
         self.path = Path(path)
-        self.entries: list[dict] = []
-        if self.path.exists():
-            for line in self.path.read_text(encoding="utf-8").splitlines():
+        self.entries: list[dict] = self._load()
+
+    def _load(self) -> list[dict]:
+        entries = []
+        if not self.path.exists():
+            return entries
+        with self.path.open(encoding="utf-8") as f:
+            for line in f:
                 line = line.strip()
-                if line:
-                    self.entries.append(json.loads(line))
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    entries.append({"seq": len(entries) + 1, "corrupt": True, "raw": line[:200]})
+        return entries
 
     def _next_seq(self) -> int:
         return (self.entries[-1]["seq"] + 1) if self.entries else 1
 
     def append(self, event: str, run: str, **detail) -> dict:
-        entry = {
-            "schema": "agentos.ledger.v0",
-            "seq": self._next_seq(),
-            "ts": datetime.now().astimezone().isoformat(timespec="milliseconds"),
-            "run": run,
-            "event": event,
-            "detail": detail,
-        }
-        prev = self.entries[-1]["hash"] if self.entries else GENESIS
-        entry["prev"] = prev
-        entry["hash"] = _digest(prev, entry)
-        self.entries.append(entry)
+        """追加事件。文件锁防并发断链（锁内以文件尾为准），fsync 降低撕裂概率。"""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as f:
+        with self.path.open("a+", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            f.seek(0)
+            last_hash, last_seq = GENESIS, 0
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                    last_hash = e.get("hash", last_hash)
+                    last_seq = int(e.get("seq", last_seq + 1))
+                except json.JSONDecodeError:
+                    continue
+            entry = {
+                "schema": "agentos.ledger.v0",
+                "seq": last_seq + 1,
+                "ts": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                "run": run,
+                "event": event,
+                "detail": detail,
+                "prev": last_hash,
+            }
+            entry["hash"] = _digest(last_hash, entry)
             f.write(_canonical(entry) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        self.entries.append(entry)
         return entry
 
-    def verify(self) -> tuple[bool, int, str]:
-        """重算全链。返回 (是否完整, 事件数, 首个坏点描述)。"""
+    def anchor(self, anchor_path: Path) -> dict:
+        """把当前链头 (count, hash) 写到账本之外的锚点文件（防整体重放/截断）。"""
+        head = self.entries[-1]["hash"] if self.entries else GENESIS
+        anchor = {"schema": "agentos.ledger.anchor.v0",
+                  "count": len(self.entries), "head": head}
+        anchor_path.parent.mkdir(parents=True, exist_ok=True)
+        anchor_path.write_text(_canonical(anchor) + "\n", encoding="utf-8")
+        return anchor
+
+    def verify(self, anchor_path: Path | None = None) -> tuple[bool, int, str]:
+        """重算全链 + 核对锚点。返回 (是否完整, 账本总条数, 首个坏点描述)。"""
         prev = GENESIS
         for i, e in enumerate(self.entries):
+            if e.get("corrupt"):
+                return False, len(self.entries), f"seq {e.get('seq')}: 行解析失败（部分写入或损坏）"
             expect = {k: v for k, v in e.items() if k != "hash"}
             if e.get("prev") != prev:
-                return False, i, f"seq {e.get('seq')}: prev-hash 链断裂"
+                return False, len(self.entries), f"seq {e.get('seq')}: prev-hash 链断裂"
             if e.get("hash") != _digest(prev, expect):
-                return False, i, f"seq {e.get('seq')}: 内容哈希不匹配（事件被篡改）"
+                return False, len(self.entries), f"seq {e.get('seq')}: 内容哈希不匹配（事件被篡改）"
             prev = e["hash"]
+        if anchor_path is not None and Path(anchor_path).exists():
+            try:
+                anchor = json.loads(Path(anchor_path).read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return False, len(self.entries), "锚点文件损坏"
+            n, head = anchor.get("count"), anchor.get("head")
+            if len(self.entries) < n:
+                return False, len(self.entries), f"账本被截断：锚点记录 {n} 条，现存 {len(self.entries)} 条"
+            if n and self.entries[n - 1].get("hash") != head:
+                return False, n, f"锚点核对失败：第 {n} 条哈希与锚点不符（前缀被重放/重建）"
+        if not self.entries:
+            return False, 0, "空账本（无事件可验）"
         return True, len(self.entries), ""

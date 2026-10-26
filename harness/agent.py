@@ -1,14 +1,19 @@
-"""Agent 循环：模型 ↔ 工具的回合制，全程过笼子、全程入账本。"""
+"""Agent 循环：模型 ↔ 工具的回合制，全程过笼子、全程入账本。
+
+异常安全承诺：无论循环正常结束、预算耗尽、模型出错还是工具异常，
+run.end 都会落账，沙箱后端的生命周期钩子（begin/end）都会配对执行。
+"""
 
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import uuid
 from datetime import datetime
 
 from .ledger import Ledger
-from .model import GLMModel, MockModel, Reply
+from .model import Reply
 from .policy import Policy
 from .sandbox import Sandbox
 from .snapshot import SnapshotManager
@@ -37,8 +42,9 @@ class AgentRunner:
             for key in ("path", "target", "command"):
                 if detail.get(key):
                     parts.append(str(detail[key]))
-            if event == "tool.denied":
-                parts.append(f"—— {detail.get('reason', '拒绝')}")
+            if event in ("tool.denied",) or (event == "tool.result" and detail.get("rc", 0) != 0):
+                if detail.get("reason") or detail.get("stderr"):
+                    parts.append(f"—— {(detail.get('reason') or detail.get('stderr') or '').strip()[:120]}")
             self._say(" ".join(parts))
 
     def run(self, task_text: str, verifier: str | None = None) -> str:
@@ -50,7 +56,7 @@ class AgentRunner:
         self._say(f"[笼子] {backend}｜读写区 {self.policy.resolved_workdir()}｜"
                   f"命令白名单 {len(self.policy.allow_commands)} 项｜断网")
         if hasattr(self.sb, "begin"):
-            self.sb.begin(self.policy)
+            self.sb.begin(self.policy, run=run)
         sid = self.snaps.create(run)
         self._event("snapshot.created", run, snapshot=sid)
         self._say(f"[存档] 快照 {sid} 已保存")
@@ -66,50 +72,76 @@ class AgentRunner:
         }, {"role": "user", "content": task_text}]
 
         report = ""
-        for _ in range(self.policy.max_steps):
-            reply: Reply = self.model.chat(messages, TOOL_SCHEMAS)
-            if not reply.tool_calls:
-                report = reply.content
-                self._event("run.end", run, how="model_final_text", report=report[:500])
-                break
-            messages.append({"role": "assistant",
-                             "content": reply.content or None,
-                             "tool_calls": [
-                                 {"id": f"c{i}", "type": "function",
-                                  "function": {"name": c["name"],
-                                               "arguments": json.dumps(c["arguments"],
-                                                                       ensure_ascii=False)}}
-                                 for i, c in enumerate(reply.tool_calls)]})
-            done = False
-            for i, call in enumerate(reply.tool_calls):
-                self._event("tool.call", run, tool=call["name"], **{
-                    k: v for k, v in call["arguments"].items() if k in ("path", "command")})
-                result, done = dispatch(call["name"], call["arguments"],
-                                        self.policy, self.sb,
-                                        on_event=lambda e, **d: self._event(e, run, **d))
-                messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": result})
+        ended = {"flag": False}
+
+        def end_run(how: str, **extra):
+            if not ended["flag"]:
+                ended["flag"] = True
+                self._event("run.end", run, how=how, report=report[:500], **extra)
+
+        try:
+            for _ in range(self.policy.max_steps):
+                try:
+                    reply: Reply = self.model.chat(messages, TOOL_SCHEMAS)
+                except Exception as e:  # 模型网络/协议错误也要落账收尾
+                    end_run("model_error", error=str(e)[:300])
+                    self._say(f"[错误] 模型调用失败：{e}")
+                    break
+                if not reply.tool_calls:
+                    report = reply.content
+                    end_run("model_final_text")
+                    break
+                messages.append({"role": "assistant",
+                                 "content": reply.content or None,
+                                 "tool_calls": [
+                                     {"id": f"c{i}", "type": "function",
+                                      "function": {"name": c["name"],
+                                                   "arguments": json.dumps(c["arguments"],
+                                                                           ensure_ascii=False)}}
+                                     for i, c in enumerate(reply.tool_calls)]})
+                done = False
+                for i, call in enumerate(reply.tool_calls):
+                    if done:  # finish 之后同回合的调用一律拒绝（M5）
+                        self._event("tool.denied", run, tool=call["name"],
+                                    reason="run already finished in this turn")
+                        messages.append({"role": "tool", "tool_call_id": f"c{i}",
+                                         "content": "[策略拒绝] 任务已结束"})
+                        continue
+                    self._event("tool.call", run, tool=call["name"], **{
+                        k: v for k, v in call["arguments"].items() if k in ("path", "command")})
+                    result, done = dispatch(call["name"], call["arguments"],
+                                            self.policy, self.sb,
+                                            on_event=lambda e, **d: self._event(e, run, **d))
+                    messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": result})
+                    if done:
+                        report = str(call["arguments"].get("report", ""))
+                        end_run("finish")
                 if done:
-                    report = str(call["arguments"].get("report", ""))
-                    self._event("run.end", run, how="finish", report=report[:500])
-            if done:
-                break
+                    break
+            else:
+                end_run("budget_exhausted")
+        finally:
+            end_run("error")  # 若上面已 end_run 则此调用是空操作
+            if hasattr(self.sb, "end"):
+                self.sb.end(self.policy, run=run)
 
         self._say(f"[完成] {report or '(无报告)'}")
-        if hasattr(self.sb, "end"):
-            self.sb.end(self.policy)
-        if verifier:
-            import subprocess
-            req = json.dumps({"task_file": task_text[:1000], "workdir": str(self.policy.resolved_workdir()),
-                              "report": report})
+
+        if verifier and ended["flag"] and not ended.get("skip"):
+            self._verify(verifier, run, task_text, report)
+        return report
+
+    def _verify(self, verifier: str, run: str, task_text: str, report: str) -> None:
+        req = json.dumps({"task_file": task_text[:1000],
+                          "workdir": str(self.policy.resolved_workdir()),
+                          "report": report})
+        try:
             proc = subprocess.run([sys.executable, verifier], input=req,
                                   capture_output=True, text=True, timeout=60)
-            try:
-                verdict = json.loads(proc.stdout or "{}")
-            except json.JSONDecodeError:
-                verdict = {"passed": False, "details": {"error": proc.stderr[:300]}}
-            self._event("verifier.verdict", run, verifier=verifier,
-                        passed=bool(verdict.get("passed")), detail=verdict.get("details"))
-            self._say(f"[验收] {'✔ 通过' if verdict.get('passed') else '✘ 未通过'} {verdict.get('details', '')}")
-            if not verdict.get("passed"):
-                report = ""
-        return report
+            verdict = json.loads(proc.stdout or "{}")
+        except (subprocess.SubprocessError, json.JSONDecodeError) as e:
+            verdict = {"passed": False, "details": {"error": str(e)[:300]}}
+        self._event("verifier.verdict", run, verifier=verifier,
+                    passed=bool(verdict.get("passed")), detail=verdict.get("details"))
+        self._say(f"[验收] {'✔ 通过' if verdict.get('passed') else '✘ 未通过'} "
+                  f"{verdict.get('details', '')}")
