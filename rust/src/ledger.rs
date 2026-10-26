@@ -6,6 +6,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -97,6 +98,8 @@ impl Ledger {
             .create(true)
             .append(true)
             .read(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW) // H3：拒绝经符号链接写入
             .open(&self.path)
             .map_err(|e| e.to_string())?;
         // 简化版互斥：真实多进程场景由调用方持锁；与 Python 一致在锁内重读文件尾
@@ -165,6 +168,22 @@ impl Ledger {
         if let Some(parent) = anchor_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
+        // H3：O_NOFOLLOW + 0600（防符号链接写入与全局可读）
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(anchor_path)
+                .map_err(|e| e.to_string())?
+                .write_all((canonical(&anchor) + "\n").as_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(unix))]
         std::fs::write(anchor_path, canonical(&anchor) + "\n").map_err(|e| e.to_string())?;
         Ok(anchor)
     }

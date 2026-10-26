@@ -28,6 +28,7 @@ class SandboxResult:
     stderr: str
     denied: bool = False
     reason: str = ""
+    enforcement: str = ""  # M5：实际强制级别，由后端如实填写并记入账本
 
 
 def _run_pguarded(argv: list[str], cwd: str | None, stdin: str | None,
@@ -65,7 +66,8 @@ class Sandbox:
             return None
         ok, why = policy.command_allowed(argv)
         if not ok:
-            return SandboxResult(rc=127, stdout="", stderr=why, denied=True, reason=why)
+            return SandboxResult(rc=127, stdout="", stderr=why, denied=True, reason=why,
+                             enforcement=self.enforcement)
         return None
 
     def execute(self, argv: list[str], policy: Policy, stdin: str | None = None,
@@ -85,7 +87,7 @@ class PlainSandbox(Sandbox):
             return blocked
         rc, out, err = _run_pguarded(argv, cwd=str(policy.resolved_workdir()),
                                      stdin=stdin, timeout=60)
-        return SandboxResult(rc, out, err)
+        return SandboxResult(rc, out, err, enforcement=self.enforcement)
 
 
 class DockerSandbox(Sandbox):
@@ -119,7 +121,7 @@ class DockerSandbox(Sandbox):
             "-w", "/work", self.IMAGE,
         ] + argv
         rc, out, err = _run_pguarded(docker_argv, cwd=None, stdin=stdin, timeout=120)
-        return SandboxResult(rc, out, err)
+        return SandboxResult(rc, out, err, enforcement=self.enforcement)
 
 
 class LandlockSandbox(Sandbox):
@@ -206,7 +208,7 @@ class LandlockSandbox(Sandbox):
             docker_argv += ["-v", f"{Path(str(r)).resolve()}:{name}:ro", "--ro", name]
         docker_argv += ["--"] + argv
         rc, out, err = _run_pguarded(docker_argv, cwd=None, stdin=stdin, timeout=120)
-        return SandboxResult(rc, out, err)
+        return SandboxResult(rc, out, err, enforcement=self.enforcement)
 
 
 class SrtSandbox(Sandbox):
@@ -249,40 +251,40 @@ class SrtSandbox(Sandbox):
         srt_argv = [self.SRT, "-s", settings_path] + argv
         rc, out, err = _run_pguarded(srt_argv, cwd=str(workdir), stdin=stdin, timeout=120)
         os.unlink(settings_path)
-        return SandboxResult(rc, out, err)
+        return SandboxResult(rc, out, err, enforcement=self.enforcement)
 
 
 class AgentdSandbox(Sandbox):
     """经由常驻 agentd（Rust 守护进程）执行——"客户端大脑 + 内核执行"架构。
 
-    协议：Unix socket NDJSON（见 rust/src/daemon.rs）。工具调用逐条发给 daemon：
-    {"cmd":"exec","params":{"policy":..., "argv":..., "stdin":...,"wait":true}}
-    daemon 侧独立记账并按其执行器（llrun/Landlock 或 plain）强制。
+    H1 修复后的协议：exec 只携带【已安装策略的名称】（非内容）——
+    权限由操作者安装在 daemon state_dir/policies/ 下的策略文件决定，
+    socket 客户端（含 AI）无法自拟权限。
 
-    注：写原语 tee 需出现在 allow_commands 中（客户端声明、daemon 内核强制）——
-    cli 在 agentd 后端会自动附加。
+    协议：Unix socket NDJSON（见 rust/src/daemon.rs），camelCase 不涉及——
+    请求 {"cmd":"exec","params":{"policy":"<名>","argv":[...],"wait":true}}
     """
 
     name = "agentd"
-    enforcement = "via-agentd"  # 实际级别由 daemon 返回并记入账本
+    enforcement = "via-agentd"  # 占位：实际级别以 daemon 返回为准（execute 回填）
 
-    def __init__(self, socket_path: Path):
+    def __init__(self, socket_path: Path, policy_name: str = "default"):
         self.socket = Path(socket_path)
+        self.policy_name = policy_name
 
     def available(self) -> bool:
         return self.socket.exists()
 
     def execute(self, argv, policy, stdin=None, internal=False):
-        blocked = self._precheck(argv, policy, internal)
-        if blocked:
-            return blocked
+        # 注意：不做客户端侧白名单预检——授权完全由 daemon 侧已安装策略决定，
+        # daemon 会用同一口径校验并记录。harness 的 policy 对象在此后端不参与授权。
         import json as _json
         import socket as _socket
         req = {
             "id": "harness",
             "cmd": "exec",
             "params": {
-                "policy": policy.to_dict(),
+                "policy": self.policy_name,
                 "argv": argv,
                 "wait": True,
             },
@@ -317,6 +319,7 @@ class AgentdSandbox(Sandbox):
             stderr=str(r.get("stderr", "")),
             denied=denied,
             reason=str(r.get("stderr", "")) if denied else "",
+            enforcement=str(r.get("enforcement", "unknown")),
         )
 
 

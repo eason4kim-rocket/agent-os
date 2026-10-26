@@ -1,15 +1,12 @@
 //! agentd — 常驻运行时：Unix socket + NDJSON 协议。
 //!
-//! 协议（每连接一个请求）：
-//!   请求: {"id":"...","cmd":"status|exec|runs|watch|verify","params":{...}}
-//!   响应: {"id":"...","ok":true,"result":{...}} 或 {"id":"...","ok":false,"error":"..."}
-//!
-//! exec 两种模式：
-//!   同步（默认）  —— params.wait 缺省/true：执行完返回 {"run","rc","stdout",...}
-//!   异步          —— params.wait=false：立即返回 {"run","accepted":true}，
-//!                    随后用 watch {"run"} 轮询 {"state":"running|done", ...}
-//!
-//! daemon 是"内核"——把命令放进策略笼子执行并记账；模型循环属于客户端。
+//! 安全模型（红队审计 H1/H3/H4 修复后的设计）：
+//!   1. **daemon 只执行本地已安装的策略**：exec 请求携带策略 *名称*（而非内容），
+//!      daemon 从 state_dir/policies/*.json 反查。socket 客户端无法自拟权限。
+//!   2. **socket 权限显式 0600**：仅属主用户可连接（跨用户被内核拒绝；
+//!      同用户残余风险见 README 诚实边界）。
+//!   3. **身份种子 0600**：写入用 OpenOptions.mode(0600)；已存在但权限过宽则拒绝启动。
+//!   4. network=true 的策略在加载时直接拒绝（当前无后端能强制网络，fail-closed）。
 
 use crate::exec::{select, Executor};
 use crate::identity;
@@ -22,7 +19,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Clone)]
@@ -34,39 +31,53 @@ pub struct DaemonConfig {
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// daemon 运行时共享状态。
 pub struct Runtime {
     pub cfg: DaemonConfig,
     pub identity: Identity,
     pub executor: Box<dyn Executor>,
     pub started: Instant,
-    /// run_id → 状态快照 {"state":"running|done", "rc":..., "stdout":..., ...}
-    pub runs: Arc<Mutex<HashMap<String, Value>>>,
+    pub policies: Arc<HashMap<String, Policy>>,
+    /// run_id → 状态快照（上限 256 条，FIFO 淘汰，防内存无限增长）
+    pub runs: Arc<Mutex<Vec<(String, Value)>>>,
 }
 
 pub fn serve(cfg: DaemonConfig) -> std::io::Result<()> {
     std::fs::create_dir_all(&cfg.state_dir)?;
+    let policies = Arc::new(load_policies(&cfg.state_dir)?);
+    let _ = std::fs::remove_file(&cfg.socket);
     if let Some(parent) = cfg.socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let _ = std::fs::remove_file(&cfg.socket);
     let listener = UnixListener::bind(&cfg.socket)?;
+
+    // 身份：H3 修复由 identity.rs 保证 0600 与权限校验
     let identity = identity::ensure(&cfg.state_dir)?;
+
     let executor = select(cfg.llrun.as_ref());
     let started = Instant::now();
     eprintln!(
-        "[agentd] listening on {} (executor: {} / {}) state: {}",
+        "[agentd] listening on {} (executor: {} / {}) state: {} policies: {}",
         cfg.socket.display(),
         executor.name(),
         executor.enforcement(),
-        cfg.state_dir.display()
+        cfg.state_dir.display(),
+        policies.len()
     );
+
+    // H4：socket 显式 0600——仅属主用户可连接（连接前内核即拒绝其他用户）
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cfg.socket, std::fs::Permissions::from_mode(0o600))?;
+    }
+
     let runtime = Arc::new(Runtime {
         cfg,
         identity,
         executor,
         started,
-        runs: Arc::new(Mutex::new(HashMap::new())),
+        policies,
+        runs: Arc::new(Mutex::new(Vec::new())),
     });
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -78,12 +89,57 @@ pub fn serve(cfg: DaemonConfig) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 从 state_dir/policies/*.json 加载已安装策略（文件名即策略名）。
+/// network=true 一律拒绝加载（当前无后端能强制网络，fail-closed，M1 修复口径）。
+fn load_policies(state_dir: &PathBuf) -> Result<HashMap<String, Policy>, std::io::Error> {
+    let dir = state_dir.join("policies");
+    std::fs::create_dir_all(&dir)?;
+    let mut map = HashMap::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let raw = std::fs::read_to_string(&path)?;
+        match serde_json::from_str::<Policy>(&raw) {
+            Ok(p) => {
+                if p.network {
+                    eprintln!("[agentd] 拒绝加载策略 '{name}'：network=true 无法被强制（fail-closed）");
+                    continue;
+                }
+                eprintln!("[agentd] 已装策略 '{name}'（读写区 {}）", p.workdir);
+                map.insert(name, p);
+            }
+            Err(e) => eprintln!("[agentd] 拒绝加载策略 '{name}'：解析失败 {e}"),
+        }
+    }
+    Ok(map)
+}
+
 fn handle_conn(stream: UnixStream, rt: &Arc<Runtime>) -> std::io::Result<()> {
-    let reader = BufReader::new(stream.try_clone()?);
+    const MAX_LINE: usize = 1 << 20; // L1：单行上限 1MiB，防内存 DoS
+    let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = std::io::BufWriter::new(stream);
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break; // 对端关闭
+        }
+        if line.len() > MAX_LINE {
+            let resp = json!({"id": null, "ok": false, "error": "请求行超过 1MiB 上限"});
+            writeln!(writer, "{}", serde_json::to_string(&resp).unwrap_or_default())?;
+            writer.flush()?;
+            continue;
+        }
+        let line = line.trim().to_string();
+        if line.is_empty() {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
@@ -124,9 +180,13 @@ fn dispatch(req: &Value, rt: &Arc<Runtime>) -> Result<Value, String> {
                 "enforcement": format!("{}/{}", rt.executor.name(), rt.executor.enforcement()),
                 "runs": runs_total,
                 "agent_pubkey": rt.identity.pubkey_hex(),
+                "policies": rt.policies.keys().cloned().collect::<Vec<_>>(),
                 "uptime_secs": rt.started.elapsed().as_secs(),
             }))
         }
+        "policies" => Ok(json!({
+            "installed": rt.policies.keys().cloned().collect::<Vec<_>>(),
+        })),
         "exec" => do_exec(&params, rt, &ledger_path, &anchor_path),
         "watch" => {
             let run = params
@@ -137,17 +197,23 @@ fn dispatch(req: &Value, rt: &Arc<Runtime>) -> Result<Value, String> {
                 .runs
                 .lock()
                 .map_err(|_| "状态锁中毒".to_string())?
-                .get(run)
-                .cloned()
+                .iter()
+                .find(|(r, _)| r == run)
+                .map(|(_, v)| v.clone())
             {
                 return Ok(state);
             }
-            // daemon 重启后内存态丢失：从账本推断（无结果详情）
+            // daemon 重启后从账本推断：M3 修复——只有 run.end 才算 done，
+            // 仅有 run.start 报 interrupted，绝不虚报完成
             let led = Ledger::load(&ledger_path);
-            let events = led.entries.iter().filter(|e| e.run == *run).count();
-            if events > 0 {
-                Ok(json!({"state": "done", "run": run, "events": events,
+            let has_end = led.entries.iter().any(|e| e.run == *run && e.event == "run.end");
+            let has_start = led.entries.iter().any(|e| e.run == *run);
+            if has_end {
+                Ok(json!({"state": "done", "run": run,
                           "note": "daemon 重启后仅能从账本确认完成状态"}))
+            } else if has_start {
+                Ok(json!({"state": "interrupted", "run": run,
+                          "note": "daemon 重启时有未完成的受理记录"}))
             } else {
                 Err(format!("未知 run: {run}"))
             }
@@ -160,15 +226,32 @@ fn dispatch(req: &Value, rt: &Arc<Runtime>) -> Result<Value, String> {
                 Err(e) => Ok(json!({"ok": false, "total": e.total, "reason": e.reason})),
             }
         }
-        other => Err(format!("未知 cmd: {other}（可用：status/exec/watch/runs/verify）")),
+        other => Err(format!("未知 cmd: {other}（可用：status/policies/exec/watch/runs/verify）")),
     }
 }
 
-fn do_exec(params: &Value, rt: &Arc<Runtime>, ledger_path: &PathBuf, anchor_path: &PathBuf) -> Result<Value, String> {
-    let policy: Policy = serde_json::from_value(
-        params.get("policy").cloned().ok_or("exec 需要 params.policy")?,
-    )
-    .map_err(|e| format!("policy 解析失败: {e}"))?;
+fn do_exec(
+    params: &Value,
+    rt: &Arc<Runtime>,
+    ledger_path: &PathBuf,
+    anchor_path: &PathBuf,
+) -> Result<Value, String> {
+    // H1 修复：exec 只接受【已安装策略的名称】，不接受客户端自拟的 policy 内容。
+    let policy_name = params
+        .get("policy")
+        .and_then(|v| v.as_str())
+        .ok_or("exec 需要 params.policy（已安装策略名，可用 policies 命令查询）")?;
+    let policy = rt
+        .policies
+        .get(policy_name)
+        .ok_or_else(|| {
+            format!(
+                "未安装策略 '{policy_name}'（已安装: {:?}）。策略由操作者放置于 {}",
+                rt.policies.keys().collect::<Vec<_>>(),
+                rt.cfg.state_dir.join("policies").display()
+            )
+        })?
+        .clone();
     let argv: Vec<String> = serde_json::from_value(
         params.get("argv").cloned().ok_or("exec 需要 params.argv")?,
     )
@@ -177,32 +260,38 @@ fn do_exec(params: &Value, rt: &Arc<Runtime>, ledger_path: &PathBuf, anchor_path
     let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
     let run = format!("{}{}", now_date(), short_uuid());
 
-    // run.start（签名：策略 canonical 摘要）—— 同步/异步都在受理线程记账
+    // run.start（签名：策略 canonical 摘要 + run id 绑定）
     let mut led = Ledger::load(ledger_path);
     let policy_val = serde_json::to_value(&policy).map_err(|e| e.to_string())?;
-    let policy_digest = sha256_hex(&crate::ledger::canonical(&policy_val));
+    let bind = json!({"policy": policy_val, "run": run});
+    let policy_digest = sha256_hex(&crate::ledger::canonical(&bind));
     let sig = rt.identity.sign_digest(&hex_decode32(&policy_digest)?);
     led.append(
         "run.start",
         &run,
         json!({
-            "policy": policy_val, "backend": format!("{}/{}", rt.executor.name(), rt.executor.enforcement()),
-            "agent_pubkey": rt.identity.pubkey_hex(), "signed": policy_digest, "agent_sig": sig,
+            "policy_name": policy_name, "policy": policy_val,
+            "backend": format!("{}/{}", rt.executor.name(), rt.executor.enforcement()),
+            "agent_pubkey": rt.identity.pubkey_hex(),
+            "signed": policy_digest, "agent_sig": sig,
         }),
     );
     drop(led);
 
     if !wait {
         if let Ok(mut m) = rt.runs.lock() {
-            m.insert(run.clone(), json!({"state": "running", "run": run}));
+            m.push((run.clone(), json!({"state": "running", "run": run})));
+            evict_oldest(&mut m);
         }
         let rt2 = Arc::clone(rt);
         let run2 = run.clone();
-        let argv2 = argv.clone();
+        let policy2 = policy.clone();
         std::thread::spawn(move || {
-            let result = run_task(&rt2, &run2, policy, argv2, stdin);
+            let result = run_task(&rt2, &run2, policy2, argv, stdin);
             if let Ok(mut m) = rt2.runs.lock() {
-                m.insert(run2, result);
+                if let Some(pos) = m.iter().position(|(r, _)| r == &run2) {
+                    m[pos].1 = result.clone();
+                }
             }
         });
         return Ok(json!({"run": run, "accepted": true}));
@@ -210,12 +299,16 @@ fn do_exec(params: &Value, rt: &Arc<Runtime>, ledger_path: &PathBuf, anchor_path
 
     let result = run_task(rt, &run, policy, argv, stdin);
     if let Ok(mut m) = rt.runs.lock() {
-        m.insert(run.clone(), result.clone());
+        if let Some(pos) = m.iter().position(|(r, _)| r == &run) {
+            m[pos].1 = result.clone();
+        } else {
+            m.push((run.clone(), result.clone()));
+        }
     }
     Ok(result)
 }
 
-/// 执行主体：执行器跑命令 → exec.result + run.end 落账 → 锚点 → 返回结果 JSON。
+/// 执行主体：校验 → 执行器 → 落账（exec.result + 签名 run.end）→ 锚点 → 结果。
 fn run_task(rt: &Runtime, run: &str, policy: Policy, argv: Vec<String>, stdin: Option<String>) -> Value {
     let ledger_path = rt.cfg.state_dir.join("ledger.jsonl");
     let anchor_path = rt.cfg.state_dir.join("ledger.anchor");
@@ -231,25 +324,39 @@ fn run_task(rt: &Runtime, run: &str, policy: Policy, argv: Vec<String>, stdin: O
 
     let res = rt.executor.execute(&policy, &argv, stdin.as_deref());
 
+    // M4 修复：run.end 签名覆盖 run id/argv/rc/输出内容/enforcement，防跨 run 重放
     let mut led = Ledger::load(&ledger_path);
     led.append(
         "exec.result",
         run,
-        json!({"argv": argv, "rc": res.rc, "enforcement": res.enforcement}),
+        json!({"argv": argv, "rc": res.rc, "enforcement": res.enforcement,
+               "network_enforced": policy.network}),
     );
-    let report_digest = sha256_hex(&format!("exec|{}|{}", res.rc, res.stdout.len()));
-    let sig = rt.identity.sign_digest(&hex_decode32(&report_digest).unwrap_or([0u8; 32]));
+    let outcome = json!({
+        "run": run, "argv": argv, "rc": res.rc,
+        "stdout": res.stdout, "stderr": res.stderr, "enforcement": res.enforcement,
+    });
+    let outcome_digest = sha256_hex(&crate::ledger::canonical(&outcome));
+    let sig = rt.identity.sign_digest(&hex_decode32(&outcome_digest).unwrap_or([0u8; 32]));
     led.append(
         "run.end",
         run,
-        json!({"how": "exec", "rc": res.rc, "agent_pubkey": rt.identity.pubkey_hex(),
-               "signed": report_digest, "agent_sig": sig}),
+        json!({"how": "exec", "outcome_digest": outcome_digest,
+               "agent_pubkey": rt.identity.pubkey_hex(),
+               "signed": outcome_digest, "agent_sig": sig}),
     );
     let _ = led.anchor(&anchor_path);
 
     json!({"state": "done", "run": run, "denied": false, "rc": res.rc,
            "stdout": res.stdout, "stderr": res.stderr,
            "enforcement": res.enforcement})
+}
+
+/// FIFO 淘汰：状态表超过 256 条时移除最旧（M3 内存泄漏修复）。
+fn evict_oldest(m: &mut Vec<(String, Value)>) {
+    while m.len() > 256 {
+        m.remove(0);
+    }
 }
 
 fn list_runs(led: &Ledger, rt: &Runtime) -> Value {
@@ -270,8 +377,8 @@ fn list_runs(led: &Ledger, rt: &Runtime) -> Value {
         .map(|(run, events, first, last)| {
             let state = states
                 .as_ref()
-                .and_then(|m| m.get(run))
-                .and_then(|v| v.get("state").and_then(|s| s.as_str()))
+                .and_then(|m| m.iter().find(|(r, _)| r == run))
+                .and_then(|(_, v)| v.get("state").and_then(|s| s.as_str()))
                 .unwrap_or("settled");
             json!({"run": run, "events": events, "first_ts": first, "last_event": last, "state": state})
         })
@@ -286,11 +393,19 @@ fn now_date() -> String {
     format!("{}{:06}", d.as_secs(), d.subsec_micros())
 }
 
+/// L3 修复：run id 随机部分来自 /dev/urandom（时间拼接存在并发碰撞）
 fn short_uuid() -> String {
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{:08x}", (d.as_nanos() & 0xffff_ffff) as u32)
+    let mut b = [0u8; 4];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut b);
+    } else {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        b = (d.subsec_nanos() as u32).to_le_bytes();
+    }
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn sha256_hex(data: &str) -> String {
@@ -326,9 +441,4 @@ pub fn request(socket: &PathBuf, req: &Value) -> std::io::Result<Value> {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()));
     }
     Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "连接被关闭且无响应"))
-}
-
-/// MutexGuard 的类型别名辅助（锁中毒转错误由调用方处理）。
-pub fn lock_map<'a>(rt: &'a Runtime) -> Option<MutexGuard<'a, HashMap<String, Value>>> {
-    rt.runs.lock().ok()
 }

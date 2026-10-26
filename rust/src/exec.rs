@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 #[derive(Debug, Clone)]
 pub struct ExecResult {
     pub rc: i32,
@@ -27,48 +30,82 @@ pub trait Executor: Send + Sync {
     fn execute(&self, policy: &Policy, argv: &[String], stdin: Option<&str>) -> ExecResult;
 }
 
-/// 超时感知的进程执行（轮询 try_wait，超时 kill）。
+/// 超时感知的进程执行。
+/// M2 修复：stdin 写入与 stdout/stderr 排空放独立线程并发（大输出不再假超时、
+/// 大 stdin 不再挂死）；M6 修复：进程组托管 + 超时 kill 整组（孤儿不再逃逸）。
 fn run_with_timeout(cmd: &mut Command, stdin: Option<&str>, timeout: Duration) -> (i32, String, String) {
+    use std::io::Read;
     use std::io::Write;
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return (127, String::new(), format!("[harness] spawn 失败: {e}")),
     };
-    if let Some(s) = stdin {
-        if let Some(mut sin) = child.stdin.take() {
-            let _ = sin.write_all(s.as_bytes());
+    let mut sin = child.stdin.take();
+    let so = child.stdout.take();
+    let se = child.stderr.take();
+
+    // 排空线程：stdout / stderr 各自独立读到底（防管道写阻塞）
+    let t_out = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(mut o) = so {
+            let _ = o.read_to_string(&mut s);
         }
-    }
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut out = String::new();
-                let mut err = String::new();
-                if let Some(mut o) = child.stdout.take() {
-                    use std::io::Read;
-                    let _ = o.read_to_string(&mut out);
-                }
-                if let Some(mut e) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = e.read_to_string(&mut err);
-                }
-                return (status.code().unwrap_or(-1), out, err);
+        s
+    });
+    let t_err = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(mut e) = se {
+            let _ = e.read_to_string(&mut s);
+        }
+        s
+    });
+    // 写入线程：写完即 drop stdin（触发子进程 EOF）；owned 化避免生命周期逃逸
+    let t_in = stdin.map(|data: &str| {
+        let data = data.to_string();
+        std::thread::spawn(move || {
+            if let Some(mut si) = sin.take() {
+                let _ = si.write_all(data.as_bytes());
             }
+        })
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    #[cfg(unix)]
+                    unsafe {
+                        // M6：杀整个进程组（child 以进程组长身份启动）
+                        libc::kill(-(child.id() as i32), libc::SIGKILL);
+                    }
+                    #[cfg(not(unix))]
                     let _ = child.kill();
                     let _ = child.wait();
-                    return (124, String::new(), "[harness] 执行超时被强制终止".into());
+                    let out = t_out.join().unwrap_or_default();
+                    let err = t_err.join().unwrap_or_default();
+                    if let Some(t) = t_in {
+                        let _ = t.join();
+                    }
+                    return (124, out, err + "\n[harness] 执行超时被强制终止");
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => return (-1, String::new(), format!("[harness] wait 失败: {e}")),
         }
+    };
+    let out = t_out.join().unwrap_or_default();
+    let err = t_err.join().unwrap_or_default();
+    if let Some(t) = t_in {
+        let _ = t.join();
     }
+    (status.code().unwrap_or(-1), out, err)
 }
 
 pub struct PlainExecutor;
