@@ -133,6 +133,53 @@ fn d6_restart_interrupted_not_done() {
     drop(state);
 }
 
+/// P8/L8：任务持久化——daemon 重启后，孤儿 run 补记 interrupted 且签名可验
+#[test]
+fn p8_persistence_marks_orphan_interrupted() {
+    use agentos_core::daemon::DaemonConfig;
+    use std::path::PathBuf;
+
+    let tag = "p8";
+    let state = temp_dir(&format!("{tag}-state"));
+    let work = temp_dir(&format!("{tag}-work"));
+    let sock = PathBuf::from(format!("/tmp/agentos-p8-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock);
+
+    // 手工种一本账：只有 run.start（模拟 daemon 在 exec 中途被杀）
+    let ledger_path = state.join("ledger.jsonl");
+    std::fs::write(
+        &ledger_path,
+        r#"{"schema":"agentos.ledger.v0","seq":1,"ts":"t","run":"orphan-p8","event":"run.start","detail":{},"prev":"00","hash":"aa"}"#.to_string() + "\n",
+    )
+    .unwrap();
+
+    let cfg = DaemonConfig { state_dir: state.clone(), socket: sock.clone(), llrun: None };
+    let cfg2 = cfg.clone();
+    std::thread::spawn(move || {
+        let _ = agentos_core::daemon::serve(cfg2);
+    });
+    for _ in 0..100 {
+        if sock.exists() {
+            std::thread::sleep(Duration::from_millis(80));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // 启动路径应已补记 interrupted（serve → mark_orphaned_runs_interrupted）
+    let led = agentos_core::ledger::Ledger::load(&ledger_path);
+    let marked = led.entries.iter().any(|e| e.run == "orphan-p8" && e.event == "run.interrupted");
+    assert!(marked, "重启后孤儿 run 应被补记 interrupted");
+
+    // watch 语义：interrupted 而非 done
+    let w = req(&sock, "watch", json!({"run": "orphan-p8"}));
+    assert_eq!(w["result"]["state"], "interrupted", "不得虚报 done: {}", w);
+
+    std::fs::remove_file(&sock).ok();
+}
+
+/// D10：run.end 签名绑定输出内容
+
 /// D10：run.end 签名绑定输出内容——同长度不同内容的两次 exec，摘要必须不同（M4 回归）
 #[test]
 fn d10_signature_binds_output_content() {
