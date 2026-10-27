@@ -79,7 +79,7 @@ in
         ProtectHostname = true;
         LockPersonality = true;
         RestrictSUIDSGID = true;
-        RestrictNamespaces = false; # Landlock 非 namespace 机制，但 daemon 端不建 ns；保守放行
+        RestrictNamespaces = true; # Landlock 非 namespace 机制，true 更严且与 deb unit 同源（审计 M3）
         RestrictRealtime = true;
         CapabilityBoundingSet = [ "" ];
         RestrictAddressFamilies = [ "AF_UNIX" ];

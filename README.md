@@ -54,7 +54,9 @@ export AGENTOS_MODEL=glm-4.6                  # optional
 > `network_enforced: false` honestly otherwise. All backends refuse policies
 > with `network: true` until a network-enforcing backend exists (fail-closed).
 > Daemon sockets are 0600 and peer-uid-checked (fail-closed on credential
-> errors).
+> errors). Policy files are installed root-owned (0640 root:agentos) so the
+> daemon cannot rewrite its own permission boundary — S-2 semantics on both
+> deb/install.sh and NixOS routes.
 
 ## Rust core (`rust/`)
 

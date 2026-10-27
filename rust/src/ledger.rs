@@ -59,6 +59,13 @@ pub struct Ledger {
     corrupt_tail: Option<String>,
 }
 
+impl Ledger {
+    /// M2 修复：坏尾行可观测——追加方（含 daemon 启动扫描）可据此拒绝写入。
+    pub fn corrupt_tail(&self) -> Option<&str> {
+        self.corrupt_tail.as_deref()
+    }
+}
+
 #[derive(Debug)]
 pub struct VerifyError {
     pub total: usize,
@@ -110,15 +117,22 @@ impl Ledger {
         f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
         let mut last_hash = GENESIS.to_string();
         let mut last_seq = 0u64;
+        let mut corrupt: Option<String> = None;
         for line in BufReader::new(&f).lines() {
             let line = line.map_err(|e| e.to_string())?;
-            let line = line.trim();
+            let line = line.trim().to_string();
             if line.is_empty() {
                 continue;
             }
-            if let Ok(e) = serde_json::from_str::<Entry>(line) {
-                last_hash = e.hash;
-                last_seq = e.seq;
+            match serde_json::from_str::<Entry>(&line) {
+                Ok(e) => {
+                    last_hash = e.hash;
+                    last_seq = e.seq;
+                }
+                Err(_) => {
+                    // M2 修复：坏行不静默跳过——拒绝在损坏账本上追加（审计 M2）
+                    return Err(format!("ledger: 坏行拒绝追加（seq {} 之后），请先修复或清理账本", last_seq + 1));
+                }
             }
         }
         let mut entry = Entry {

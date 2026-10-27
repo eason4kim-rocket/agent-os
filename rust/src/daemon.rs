@@ -337,6 +337,12 @@ fn run_task(rt: &Runtime, run: &str, policy: Policy, argv: Vec<String>, stdin: O
     if let Err(why) = policy.validate_run_command(&argv) {
         let mut led = Ledger::load(&ledger_path);
         led.append("exec.denied", run, json!({"argv": argv, "reason": why}));
+        // M1 修复：拒绝也是终态——补 run.end（how=denied），重启后不被误标 interrupted
+        led.append(
+            "run.end",
+            &run,
+            json!({"how": "denied", "rc": 127, "agent_pubkey": rt.identity.pubkey_hex()}),
+        );
         let _ = led.anchor(&anchor_path);
         return json!({"state": "done", "run": run, "denied": true, "rc": 127,
                       "stdout": "", "stderr": why,
@@ -465,21 +471,15 @@ fn mark_orphaned_runs_interrupted(
     // 每个 run 的收尾事件集合
     let mut finished: HashMap<String, bool> = HashMap::new();
     for e in &led.entries {
-        let run = &e.run;
-        let f = finished.entry(run.clone()).or_insert(false);
+        if e.run.is_empty() {
+            continue;
+        }
+        let f = finished.entry(e.run.clone()).or_insert(false);
         match e.event.as_str() {
-            "run.end" | "exec.finish" => *f = true,
-            "run.interrupted" => *f = true,
+            "run.end" | "exec.finish" | "exec.denied" | "run.interrupted" => *f = true,
             _ => {}
         }
     }
-    let orphans: Vec<String> = finished
-        .iter()
-        .filter(|(run, done)| !**done && !run.is_empty())
-        .map(|(run, _)| run.clone())
-        .collect();
-    let _ = orphans; // finished 的键即 run 名
-
     let mut marked_any = false;
     for (run, done) in &finished {
         if *done {
@@ -497,7 +497,8 @@ fn mark_orphaned_runs_interrupted(
             run,
             json!({"agent_pubkey": identity.pubkey_hex(), "signed": digest, "agent_sig": sig,
                    "reason": "daemon 重启时有未完成的受理记录"}),
-        );
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("interrupted 补记失败 {run}: {e}")))?;
         marked_any = true;
     }
     if marked_any {
