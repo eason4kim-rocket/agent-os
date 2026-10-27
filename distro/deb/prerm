@@ -1,0 +1,10 @@
+#!/bin/bash
+# prerm: 卸载/升级前
+# upgrade 也停服（M-4：否则升级全程旧二进制继续服务，新版本永不生效）
+set -e
+if systemctl is-active --quiet agentos-agentd.service 2>/dev/null; then
+  systemctl stop agentos-agentd.service
+fi
+if [[ "$1" == "remove" || "$1" == "purge" || "$1" == "upgrade" ]]; then
+  systemctl disable agentos-agentd.service 2>/dev/null || true  # M-5：不留悬空自启软链
+fi

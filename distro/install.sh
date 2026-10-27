@@ -36,7 +36,7 @@ fi
 
 BIN="$PREFIX/bin"
 STATE="/var/lib/agentos"
-SOCKET="/run/agentos/agentd.sock"
+SOCKET="/var/lib/agentos/agentd.sock"
 UNIT="/etc/systemd/system/agentos-agentd.service"
 
 echo "== [1/5] 编译（release bins，用户工具链） =="
@@ -56,9 +56,6 @@ echo "== [3/5] 状态目录 + socket 目录 + 策略 =="
 sudo install -d -m 0750 -o "$RUN_USER" "$STATE"
 sudo install -d -m 0750 -o "$RUN_USER" "$STATE/policies"
 # socket 目录：namespace 挂载前必须已存在；tmpfiles.d 保证重启后自动重建
-RUN_GROUP="$(id -gn "$RUN_USER")"
-sudo install -d -m 0700 -o "$RUN_USER" -g "$RUN_GROUP" /run/agentos
-echo "d /run/agentos 0700 $RUN_USER $RUN_GROUP -" | sudo tee /etc/tmpfiles.d/agentos.conf >/dev/null
 if [[ -n "$WORKDIR" ]]; then
   sudo install -d -m 0750 -o "$RUN_USER" "$WORKDIR"
 fi
