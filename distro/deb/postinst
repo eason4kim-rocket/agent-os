@@ -1,27 +1,52 @@
 #!/bin/bash
-# postinst: 配置阶段（安装后）
+# postinst: 配置阶段（安装/升级后）
+# $1 = configure 时 $2 为旧版本号（升级路径：服务 try-restart 使新二进制生效，M-4）
 set -e
 
 # 服务运行用户（系统用户，无登录 shell）
 getent passwd agentos >/dev/null || adduser --system --group --home /var/lib/agentos --no-create-home --shell /usr/sbin/nologin agentos
 
-# 状态与工作目录（策略 workdir 指向 /var/lib/agentos/work）
-# 整树接管属主：升级/换用户场景下，state 内的账本/身份/策略一并归 agentos
+# 状态目录：不存在则建；属主不是 agentos（如曾用 install.sh 以其他用户部署）→
+# 接管时显式告警（审计 M-6：账本是证据，保管方变更不应静默）
 install -d -m 0750 -o agentos -g agentos /var/lib/agentos
-chown -R agentos:agentos /var/lib/agentos
+if [ -n "$(find /var/lib/agentos -maxdepth 1 ! -user agentos 2>/dev/null | head -1)" ]; then
+  echo "agentos-runtime: 接管 /var/lib/agentos 内非 agentos 属主的文件（chown -R agentos:agentos）"
+  chown -R agentos:agentos /var/lib/agentos
+fi
 install -d -m 0750 -o agentos -g agentos /var/lib/agentos/policies /var/lib/agentos/work
-# tmpfiles：/run/agentos（socket 目录，重启后自动重建）
-systemd-tmpfiles --create /usr/lib/tmpfiles.d/agentos.conf 2>/dev/null || true
 
-# 示例策略（conffle 语义：不覆盖已存在的用户策略）
-if [[ ! -f /var/lib/agentos/policies/default.json ]]; then
-  install -m 0644 -o agentos -g agentos /usr/share/agentos/policies/default.json \
+# 策略文件：root 属主、agentos 组只读（S-2：daemon 不可自改自己的权限边界）
+if [ ! -f /var/lib/agentos/policies/default.json ]; then
+  install -m 0640 -o root -g agentos /usr/share/agentos/policies/default.json \
     /var/lib/agentos/policies/default.json
 fi
 
-systemctl daemon-reload
-systemctl enable --now agentos-agentd.service
+# tmpfiles：/run/agentos（socket 目录，重启后自动重建）
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/agentos.conf 2>/dev/null || true
 
-echo "agentos-runtime: 冒烟（以服务用户身份）"
-sudo -u agentos /usr/bin/agentctl --socket /run/agentos/agentd.sock status | head -8 || true
-echo "提示: 策略在 /var/lib/agentos/policies/，客户端用法见 agentctl --help"
+# M-1：无 systemd 环境（容器/chroot）容错；有 systemd 时才 enable
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload
+  systemctl enable agentos-agentd.service >/dev/null 2>&1 || true
+  # M-4：升级路径重启服务使新二进制生效；首装则 start（失败仅告警，is-active 由运维判定）
+  if systemctl try-restart agentos-agentd.service 2>/dev/null; then
+    :
+  else
+    systemctl start agentos-agentd.service 2>/dev/null \
+      || echo "agentos-runtime: 服务启动失败——请查 journalctl -u agentos-agentd"
+  fi
+fi
+
+# M-2：冒烟用 runuser（util-linux 必装，不依赖 sudo）；socket 就绪重试
+smoke_ok=""
+for i in 1 2 3 4 5; do
+  if runuser -u agentos -- /usr/bin/agentctl --socket /run/agentos/agentd.sock status >/dev/null 2>&1; then
+    smoke_ok="yes"; break
+  fi
+  sleep 0.5
+done
+if [ "$smoke_ok" = "yes" ]; then
+  echo "agentos-runtime: 冒烟通过（status ✅）"
+else
+  echo "agentos-runtime: 冒烟未通过（可能仍在启动，请稍后 systemctl status agentos-agentd 检查）"
+fi
