@@ -1,0 +1,27 @@
+#!/bin/bash
+# postinst: 配置阶段（安装后）
+set -e
+
+# 服务运行用户（系统用户，无登录 shell）
+getent passwd agentos >/dev/null || adduser --system --group --home /var/lib/agentos --no-create-home --shell /usr/sbin/nologin agentos
+
+# 状态与工作目录（策略 workdir 指向 /var/lib/agentos/work）
+# 整树接管属主：升级/换用户场景下，state 内的账本/身份/策略一并归 agentos
+install -d -m 0750 -o agentos -g agentos /var/lib/agentos
+chown -R agentos:agentos /var/lib/agentos
+install -d -m 0750 -o agentos -g agentos /var/lib/agentos/policies /var/lib/agentos/work
+# tmpfiles：/run/agentos（socket 目录，重启后自动重建）
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/agentos.conf 2>/dev/null || true
+
+# 示例策略（conffle 语义：不覆盖已存在的用户策略）
+if [[ ! -f /var/lib/agentos/policies/default.json ]]; then
+  install -m 0644 -o agentos -g agentos /usr/share/agentos/policies/default.json \
+    /var/lib/agentos/policies/default.json
+fi
+
+systemctl daemon-reload
+systemctl enable --now agentos-agentd.service
+
+echo "agentos-runtime: 冒烟（以服务用户身份）"
+sudo -u agentos /usr/bin/agentctl --socket /run/agentos/agentd.sock status | head -8 || true
+echo "提示: 策略在 /var/lib/agentos/policies/，客户端用法见 agentctl --help"

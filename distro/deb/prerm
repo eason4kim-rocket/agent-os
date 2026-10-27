@@ -1,0 +1,6 @@
+#!/bin/bash
+# prerm: 卸载/升级前（停止服务）
+set -e
+if [[ "$1" == "remove" || "$1" == "purge" ]] && systemctl is-active --quiet agentos-agentd.service; then
+  systemctl stop agentos-agentd.service
+fi

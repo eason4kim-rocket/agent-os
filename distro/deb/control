@@ -1,0 +1,18 @@
+Package: agentos-runtime
+Version: 0.1.0
+Section: utils
+Priority: optional
+Architecture: arm64
+Depends: libc6 (>= 2.38), systemd | system-container
+Recommends: strace
+Maintainer: AgentOS contributors <https://github.com/eason4kim-rocket/agent-os>
+Homepage: https://github.com/eason4kim-rocket/agent-os
+Description: AgentOS runtime — policy-enforced exec + signed ledger for AI agents
+ Resident daemon (agentd) that executes commands inside a Landlock/seccomp
+ policy cage on behalf of AI agents, records every action to a signed
+ hash-chain ledger, and exposes a minimal control client (agentctl).
+ .
+ This package ships the kernel-native Landlock enforcement backend
+ (llrun), the daemon, the control client, and a ledger verification tool.
+ Policies are installed under /var/lib/agentos/policies/ and are referenced
+ BY NAME by clients — socket clients cannot self-grant permissions.
