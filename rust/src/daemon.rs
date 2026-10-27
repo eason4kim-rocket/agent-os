@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -74,6 +74,10 @@ pub fn serve(cfg: DaemonConfig) -> std::io::Result<()> {
         std::fs::set_permissions(&cfg.socket, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| std::io::Error::new(e.kind(), format!("socket: chmod: {e}")))?;
     }
+
+    // 任务持久化：扫描账本，给"受理过但从未结束"的孤儿 run 补记 interrupted
+    // （daemon 崩溃/被杀时后台任务随之消亡；账本必须如实记录这一事实）
+    mark_orphaned_runs_interrupted(&cfg.state_dir, &identity);
 
     let runtime = Arc::new(Runtime {
         cfg,
@@ -442,6 +446,68 @@ fn hex_decode32(s: &str) -> Result<[u8; 32], String> {
         .collect::<Result<_, _>>()?;
     v.try_into().map_err(|_| "摘要长度不是 32 字节".to_string())
 }
+
+/// 任务持久化：重启后扫描账本，给"受理过但从未结束"的孤儿 run 补记 interrupted。
+///
+/// 崩溃/被杀时后台任务随之消亡——账本必须如实记录这一事实，而不是让
+/// watch 永远挂着 running。已有 run.end/exec 结尾事件的 run 不受影响；
+/// 已标记过 interrupted 的也不重复标记。
+fn mark_orphaned_runs_interrupted(
+    state_dir: &Path,
+    identity: &crate::identity::Identity,
+) -> std::io::Result<()> {
+    let ledger_path = state_dir.join("ledger.jsonl");
+    let mut led = Ledger::load(&ledger_path);
+    if led.entries.is_empty() {
+        return Ok(());
+    }
+
+    // 每个 run 的收尾事件集合
+    let mut finished: HashMap<String, bool> = HashMap::new();
+    for e in &led.entries {
+        let run = &e.run;
+        let f = finished.entry(run.clone()).or_insert(false);
+        match e.event.as_str() {
+            "run.end" | "exec.finish" => *f = true,
+            "run.interrupted" => *f = true,
+            _ => {}
+        }
+    }
+    let orphans: Vec<String> = finished
+        .iter()
+        .filter(|(run, done)| !**done && !run.is_empty())
+        .map(|(run, _)| run.clone())
+        .collect();
+    let _ = orphans; // finished 的键即 run 名
+
+    let mut marked_any = false;
+    for (run, done) in &finished {
+        if *done {
+            continue;
+        }
+        // 签名：daemon 身份对"该 run 被中断"这一事实背书
+        let outcome = json!({"run": run, "state": "interrupted"});
+        let digest = sha256_hex(&crate::ledger::canonical(&outcome));
+        let sig = identity
+            .sign_digest(&hex_decode32(&digest).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+            })?);
+        led.append(
+            "run.interrupted",
+            run,
+            json!({"agent_pubkey": identity.pubkey_hex(), "signed": digest, "agent_sig": sig,
+                   "reason": "daemon 重启时有未完成的受理记录"}),
+        );
+        marked_any = true;
+    }
+    if marked_any {
+        led.anchor(&state_dir.join("ledger.anchor")).ok();
+        eprintln!("[agentd] 已为孤儿 run 补记 interrupted");
+    }
+    Ok(())
+}
+
+/// 客户端/测试辅助：连接 socket、发送请求、读取一行响应。
 
 /// 客户端/测试辅助：连接 socket、发送请求、读取一行响应。
 pub fn request(socket: &PathBuf, req: &Value) -> std::io::Result<Value> {
