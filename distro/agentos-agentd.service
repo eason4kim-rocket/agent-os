@@ -33,9 +33,8 @@ RestrictNamespaces=yes
 RestrictRealtime=yes
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX
+# SystemCallFilter 收紧待 syscall 级分析（实测 255 的 @system-service 会 EACCES 拒启动）；主控制是 Landlock，不受影响
 # Landlock 三 syscall 显式放行（@system-service 集合是否已含依 systemd 版本而异）
-SystemCallFilter=@system-service
-SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self
 SystemCallArchitectures=native
 # 写白名单：state（账本/锚点/策略）、socket 目录（RuntimeDirectory 在
 # ProtectSystem=strict 下必须显式加白）、任务工作区（install.sh 保证已存在）

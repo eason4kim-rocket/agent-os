@@ -71,7 +71,8 @@ pub fn serve(cfg: DaemonConfig) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&cfg.socket, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&cfg.socket, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| std::io::Error::new(e.kind(), format!("socket: chmod: {e}")))?;
     }
 
     let runtime = Arc::new(Runtime {
@@ -96,10 +97,13 @@ pub fn serve(cfg: DaemonConfig) -> std::io::Result<()> {
 /// network=true 一律拒绝加载（当前无后端能强制网络，fail-closed，M1 修复口径）。
 fn load_policies(state_dir: &PathBuf) -> Result<HashMap<String, Policy>, std::io::Error> {
     let dir = state_dir.join("policies");
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("load_policies: create_dir_all {}: {e}", dir.display())))?;
     let mut map = HashMap::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("load_policies: read_dir {}: {e}", dir.display())))?
+    {
+        let entry = entry.map_err(|e| std::io::Error::new(e.kind(), format!("load_policies: entry: {e}")))?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
@@ -109,7 +113,8 @@ fn load_policies(state_dir: &PathBuf) -> Result<HashMap<String, Policy>, std::io
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        let raw = std::fs::read_to_string(&path)?;
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("load_policies: read {}: {e}", path.display())))?;
         match serde_json::from_str::<Policy>(&raw) {
             Ok(p) => {
                 if p.network {
