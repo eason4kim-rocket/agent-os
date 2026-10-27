@@ -28,7 +28,6 @@ echo "== [1/3] cargo release 构建 =="
 echo "== [2/3] 组装包树 =="
 install -d "$STAGE/DEBIAN" \
   "$STAGE/usr/bin" \
-  "$STAGE/usr/lib/tmpfiles.d" \
   "$STAGE/usr/lib/systemd/system" \
   "$STAGE/usr/share/agentos/policies" \
   "$STAGE/var/lib/agentos/policies" \
@@ -52,8 +51,15 @@ install -m 0755 "$SOURCE/rust/target/release/agentctl"      "$STAGE/usr/bin/agen
 install -m 0755 "$SOURCE/rust/target/release/llrun"         "$STAGE/usr/bin/llrun"
 install -m 0755 "$SOURCE/rust/target/release/ledger-verify" "$STAGE/usr/bin/ledger-verify"
 install -m 0644 "$SOURCE/distro/deb/agentos-agentd.service" "$STAGE/usr/lib/systemd/system/agentos-agentd.service"
-install -m 0644 "$SOURCE/distro/deb/tmpfiles.conf"          "$STAGE/usr/lib/tmpfiles.d/agentos.conf"
 install -m 0644 "$SOURCE/policies/default.example.json"     "$STAGE/usr/share/agentos/policies/default.json"
+# M-3 修复：deb 布局的出厂 workdir = state 内工作区（与 ReadWritePaths 对齐）
+python3 - "$STAGE/usr/share/agentos/policies/default.json" <<'PY'
+import json
+p = "/usr/share/agentos/policies/default.json"
+d = json.load(open(p, encoding="utf-8"))
+d["workdir"] = "/var/lib/agentos/work"
+json.dump(d, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+PY
 
 echo "== [3/3] dpkg-deb 构建 =="
 mkdir -p "$OUT"

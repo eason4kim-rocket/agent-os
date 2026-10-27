@@ -12,6 +12,8 @@ install -d -m 0750 -o agentos -g agentos /var/lib/agentos
 if [ -n "$(find /var/lib/agentos -maxdepth 1 ! -user agentos 2>/dev/null | head -1)" ]; then
   echo "agentos-runtime: 接管 /var/lib/agentos 内非 agentos 属主的文件（chown -R agentos:agentos）"
   chown -R agentos:agentos /var/lib/agentos
+  # M-B 修复：策略边界归 root——接管不得让 daemon 获得策略改写权（S-2 语义）
+  chown -R root:agentos /var/lib/agentos/policies 2>/dev/null || true
 fi
 install -d -m 0750 -o agentos -g agentos /var/lib/agentos/policies /var/lib/agentos/work
 
@@ -20,27 +22,25 @@ if [ ! -f /var/lib/agentos/policies/default.json ]; then
   install -m 0640 -o root -g agentos /usr/share/agentos/policies/default.json \
     /var/lib/agentos/policies/default.json
 fi
-
-# tmpfiles：/run/agentos（socket 目录，重启后自动重建）
-systemd-tmpfiles --create /usr/lib/tmpfiles.d/agentos.conf 2>/dev/null || true
+# 确保既有策略文件也是 root:agentos（接管后的策略边界恢复）
+if [ -f /var/lib/agentos/policies/default.json ]; then
+  chown root:agentos /var/lib/agentos/policies/default.json 2>/dev/null || true
+  chmod 0640 /var/lib/agentos/policies/default.json 2>/dev/null || true
+fi
 
 # M-1：无 systemd 环境（容器/chroot）容错；有 systemd 时才 enable
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   systemctl enable agentos-agentd.service >/dev/null 2>&1 || true
-  # M-4：升级路径重启服务使新二进制生效；首装则 start（失败仅告警，is-active 由运维判定）
-  if systemctl try-restart agentos-agentd.service 2>/dev/null; then
-    :
-  else
-    systemctl start agentos-agentd.service 2>/dev/null \
-      || echo "agentos-runtime: 服务启动失败——请查 journalctl -u agentos-agentd"
-  fi
+  # B-1 修复：start 对已运行单元是幂等 no-op——首装与升级两条路径都正确启动
+  systemctl start agentos-agentd.service 2>/dev/null \
+    || echo "agentos-runtime: 服务启动失败——请查 journalctl -u agentos-agentd"
 fi
 
-# M-2：冒烟用 runuser（util-linux 必装，不依赖 sudo）；socket 就绪重试
+# M-2 + B-4：冒烟用 runuser；socket 路径随迁移更新（state 目录）
 smoke_ok=""
 for i in 1 2 3 4 5; do
-  if runuser -u agentos -- /usr/bin/agentctl --socket /run/agentos/agentd.sock status >/dev/null 2>&1; then
+  if runuser -u agentos -- /usr/bin/agentctl --socket /var/lib/agentos/agentd.sock status >/dev/null 2>&1; then
     smoke_ok="yes"; break
   fi
   sleep 0.5
